@@ -5,6 +5,8 @@ import unittest
 
 import config
 import database
+import telegram
+from models import Car
 
 
 class SoldDetectionTests(unittest.TestCase):
@@ -118,6 +120,68 @@ class SoldDetectionTests(unittest.TestCase):
         self.assertEqual(cars[0].fingerprint, "fingerprint-two")
         self.assertEqual(cars[0].title, "Audi A5 Cabrio")
 
+    def test_car_model_maps_existing_database_layout_correctly(self):
+        row = [
+            1, 123, "fingerprint", "Audi A5", 25000, 50000, "2020",
+            0, 0, 0, "https://example.com/a", "2024-01-01", "2024-01-02",
+            0, "", "new", 20000, 0, 0, "", 0, "", "", 0,
+            "blauw", "Navarra Blau", "leder", "schwarz", "S tronic", "Cabrio", 184,
+            "quattro", "", 42, 1, 1, "2024-03-01", "silver", 0, "2024-03-02"
+        ]
+
+        car = Car(tuple(row))
+
+        self.assertEqual(car.color, "blauw")
+        self.assertEqual(car.color_detail, "Navarra Blau")
+        self.assertEqual(car.upholstery, "leder")
+        self.assertEqual(car.interior_color, "schwarz")
+        self.assertEqual(car.personal_score, 42)
+        self.assertEqual(car.watchlist_match, 1)
+        self.assertEqual(car.sold, 0)
+        self.assertEqual(car.sold_at, "2024-03-02")
+        self.assertEqual(car.roof_color, "silver")
+
+    def test_ranking_excludes_sold_cars(self):
+        active_car = {
+            "fingerprint": "active-fingerprint",
+            "title": "Audi A5",
+            "price": 25000,
+            "km": 50000,
+            "year": "2020",
+            "url": "https://example.com/active",
+            "color": "blauw",
+            "color_detail": "Navarra Blau",
+            "upholstery": "",
+            "interior_color": "",
+            "gearbox": "",
+            "body_type": "",
+            "hp": 184,
+            "drive": "",
+        }
+        sold_car = {
+            "fingerprint": "sold-fingerprint",
+            "title": "Audi A5 Cabrio",
+            "price": 30000,
+            "km": 60000,
+            "year": "2021",
+            "url": "https://example.com/sold",
+            "color": "zwart",
+            "color_detail": "Schwarz",
+            "upholstery": "",
+            "interior_color": "",
+            "gearbox": "",
+            "body_type": "",
+            "hp": 204,
+            "drive": "",
+        }
+
+        database.save_car(active_car)
+        database.save_car(sold_car)
+        database.mark_missing_cars_sold([active_car["fingerprint"]])
+
+        ranking = database.get_ranking(10)
+        self.assertEqual([car.fingerprint for car in ranking], ["active-fingerprint"])
+
     def test_inventory_counts_include_active_new_and_sold(self):
         active_car = {
             "fingerprint": "active-fingerprint",
@@ -160,6 +224,70 @@ class SoldDetectionTests(unittest.TestCase):
         self.assertEqual(counts["active"], 1)
         self.assertEqual(counts["new"], 1)
         self.assertEqual(counts["sold"], 1)
+
+    def test_mark_missing_cars_sold_returns_number_marked_sold(self):
+        active_car = {
+            "fingerprint": "active-fingerprint",
+            "title": "Audi A5",
+            "price": 25000,
+            "km": 50000,
+            "year": "2020",
+            "url": "https://example.com/active",
+            "color": "blauw",
+            "color_detail": "Navarra Blau",
+            "upholstery": "",
+            "interior_color": "",
+            "gearbox": "",
+            "body_type": "",
+            "hp": 184,
+            "drive": "",
+        }
+        sold_car = {
+            "fingerprint": "sold-fingerprint",
+            "title": "Audi A5 Cabrio",
+            "price": 30000,
+            "km": 60000,
+            "year": "2021",
+            "url": "https://example.com/sold",
+            "color": "zwart",
+            "color_detail": "Schwarz",
+            "upholstery": "",
+            "interior_color": "",
+            "gearbox": "",
+            "body_type": "",
+            "hp": 204,
+            "drive": "",
+        }
+
+        database.save_car(active_car)
+        database.save_car(sold_car)
+
+        marked = database.mark_missing_cars_sold([active_car["fingerprint"]])
+
+        self.assertEqual(marked, 1)
+
+    def test_pipeline_summary_message_contains_run_and_database_metrics(self):
+        message = telegram.build_pipeline_summary_message(
+            run_stats={
+                "status": "SUCCESS",
+                "duration_seconds": 42,
+                "new_cars": 3,
+                "not_available_anymore": 2,
+                "price_drops": 1,
+                "high_score_cars": 4,
+                "descriptions_updated": 5,
+                "options_updated": 6,
+                "alerts_sent": 7,
+            },
+            db_stats={
+                "active_cars": 10,
+                "not_available_anymore_total": 12,
+            }
+        )
+
+        self.assertIn("SUCCESS", message)
+        self.assertIn("Not available anymore: 2", message)
+        self.assertIn("Active cars: 10", message)
 
 
 if __name__ == "__main__":

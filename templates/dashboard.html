@@ -54,8 +54,13 @@ High score auto's:
 {% if data["latest_run"] %}
 
 <p>
-Laatste run:
+Starttijd:
 <strong>{{ data["latest_run"]["started_at"] }}</strong>
+</p>
+
+<p>
+Eindtijd:
+<strong>{{ data["latest_run"]["finished_at"] }}</strong>
 </p>
 
 <p>
@@ -63,12 +68,21 @@ Status:
 <strong>{{ data["latest_run"]["status"] }}</strong>
 </p>
 
+<p>Duur: {{ data["latest_run"]["duration_seconds"] }} seconden</p>
+
 <p>Nieuwe auto's: {{ data["latest_run"]["new_cars"] }}</p>
+<p>Niet meer beschikbaar: {{ data["latest_run"]["not_available_anymore"] }}</p>
+<p>Prijsdalingen: {{ data["latest_run"]["price_drops"] }}</p>
+<p>High score auto's: {{ data["latest_run"]["high_score_cars"] }}</p>
 <p>Descriptions bijgewerkt: {{ data["latest_run"]["descriptions_updated"] }}</p>
 <p>Opties geanalyseerd: {{ data["latest_run"]["options_updated"] }}</p>
-<p>Deal scores: {{ data["latest_run"]["deal_scores_updated"] }}</p>
 <p>Alerts: {{ data["latest_run"]["alerts_sent"] }}</p>
-<p>Duur: {{ data["latest_run"]["duration_seconds"] }} seconden</p>
+
+<p><strong>Database</strong></p>
+<p>Actieve auto's: {{ data["inventory"]["active"] }}</p>
+<p>Niet meer beschikbaar: {{ data["inventory"]["sold"] }}</p>
+<p>Totale prijsdalingen: {{ data["stats"]["price_drops"] }}</p>
+<p>Totale high score auto's: {{ data["stats"]["high_score_cars"] }}</p>
 
 {% if data["latest_run"]["error_message"] %}
 <p>Fout: {{ data["latest_run"]["error_message"] }}</p>

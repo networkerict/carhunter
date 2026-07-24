@@ -593,6 +593,7 @@ def init_database(conn):
         finished_at DATETIME,
         status TEXT,
         new_cars INTEGER DEFAULT 0,
+        not_available_anymore INTEGER DEFAULT 0,
         descriptions_updated INTEGER DEFAULT 0,
         options_updated INTEGER DEFAULT 0,
         deal_scores_updated INTEGER DEFAULT 0,
@@ -609,6 +610,7 @@ def init_database(conn):
         ("finished_at", "DATETIME"),
         ("status", "TEXT"),
         ("new_cars", "INTEGER DEFAULT 0"),
+        ("not_available_anymore", "INTEGER DEFAULT 0"),
         ("descriptions_updated", "INTEGER DEFAULT 0"),
         ("options_updated", "INTEGER DEFAULT 0"),
         ("deal_scores_updated", "INTEGER DEFAULT 0"),
@@ -740,6 +742,7 @@ def get_ranking(limit=10):
         """
         SELECT *
         FROM cars
+        WHERE COALESCE(sold, 0) = 0
         ORDER BY
             personal_score DESC,
             final_score DESC
@@ -1103,7 +1106,7 @@ def mark_missing_cars_sold(active_fingerprints):
     active_fingerprints = [fp for fp in active_fingerprints if fp]
 
     if not active_fingerprints:
-        conn.execute(
+        cursor = conn.execute(
             """
             UPDATE cars
             SET sold = 1,
@@ -1113,7 +1116,7 @@ def mark_missing_cars_sold(active_fingerprints):
         )
     else:
         placeholders = ",".join(["?"] * len(active_fingerprints))
-        conn.execute(
+        cursor = conn.execute(
             f"""
             UPDATE cars
             SET sold = 1,
@@ -1126,6 +1129,8 @@ def mark_missing_cars_sold(active_fingerprints):
 
     conn.commit()
     conn.close()
+
+    return cursor.rowcount
 
 
 def mark_car_active(car_id):

@@ -259,7 +259,7 @@ def run_pipeline():
             "Scraping AutoScout24"
         )
 
-        new_cars = scraper.run_scraper()
+        new_cars, not_available_anymore = scraper.run_scraper()
 
         debug.info(
             "Updating descriptions"
@@ -352,11 +352,26 @@ def run_pipeline():
 
         stats = pipeline_stats.get_pipeline_stats()
 
+        run_stats = {
+            "status": "SUCCESS",
+            "duration_seconds": 0,
+            "new_cars": new_cars,
+            "not_available_anymore": not_available_anymore,
+            "price_drops": stats["price_drops"],
+            "high_score_cars": stats["high_score_cars"],
+            "descriptions_updated": descriptions_updated,
+            "options_updated": options_updated,
+            "alerts_sent": 0,
+        }
+
         try:
 
             import telegram
 
-            telegram.send_pipeline_summary(stats)
+            telegram.send_pipeline_summary(
+                run_stats=run_stats,
+                db_stats=stats
+            )
 
             today_cars = database.get_todays_cars(10)
 
@@ -413,6 +428,7 @@ def run_pipeline():
             run_id,
             status="SUCCESS",
             new_cars=new_cars,
+            not_available_anymore=not_available_anymore,
             descriptions_updated=descriptions_updated,
             options_updated=options_updated,
             deal_scores_updated=deal_scores_updated,

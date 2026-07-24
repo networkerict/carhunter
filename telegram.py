@@ -75,18 +75,40 @@ def send_message(message):
 
 
 
-def send_pipeline_summary(stats):
+def build_pipeline_summary_message(run_stats=None, db_stats=None):
 
-    message = f"""
-🚗 AutoHunter Pipeline
+    run_stats = run_stats or {}
+    db_stats = db_stats or {}
 
-🔥 High score auto's: {stats.get('high_score_cars',0)}
-💰 Prijsdalingen: {stats.get('price_drops',0)}
-"""
+    lines = [
+        "🚗 AutoHunter Pipeline",
+        "",
+        f"✅ {run_stats.get('status', 'UNKNOWN')} ({run_stats.get('duration_seconds', 0)} sec)",
+        "",
+        f"📥 New cars: {run_stats.get('new_cars', 0)}",
+        f"🚫 Not available anymore: {run_stats.get('not_available_anymore', 0)}",
+        f"💰 Price drops: {run_stats.get('price_drops', 0)}",
+        f"🔥 High score cars: {run_stats.get('high_score_cars', 0)}",
+        f"📝 Descriptions updated: {run_stats.get('descriptions_updated', 0)}",
+        f"⚙️ Options updated: {run_stats.get('options_updated', 0)}",
+        f"🚨 Alerts sent: {run_stats.get('alerts_sent', 0)}",
+        "",
+        "📊 Database",
+        f"🚗 Active cars: {db_stats.get('active_cars', 0)}",
+        f"🚫 Not available anymore: {db_stats.get('not_available_anymore_total', 0)}",
+    ]
 
-    send_message(
-        message.strip()
+    return "\n".join(lines).strip()
+
+
+def send_pipeline_summary(run_stats=None, db_stats=None):
+
+    message = build_pipeline_summary_message(
+        run_stats,
+        db_stats
     )
+
+    return send_message(message)
 
 
 

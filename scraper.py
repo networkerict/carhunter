@@ -859,6 +859,6 @@ def run_scraper():
         if result:
             new_cars += 1
 
-    database.mark_missing_cars_sold(active_fingerprints)
+    not_available_anymore = database.mark_missing_cars_sold(active_fingerprints)
 
-    return new_cars
+    return new_cars, not_available_anymore

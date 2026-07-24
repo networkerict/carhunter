@@ -44,27 +44,63 @@ class Car:
         self.options_checked = row[21]
 
         self.description = row[22]
-        self.sold = row[24] if len(row) > 24 else 0
-        self.sold_at = row[25] if len(row) > 25 else None
-        self.color = row[26] if len(row) > 26 else ""
-        self.color_detail = row[27] if len(row) > 27 else ""
 
-        self.upholstery = row[28] if len(row) > 28 else ""
-        self.interior_color = row[29] if len(row) > 29 else ""
-        self.roof_color = row[39] if len(row) > 39 else ""
+        if len(row) > 39 and isinstance(row[24], str):
+            color_index = 24
+            color_detail_index = 25
+            upholstery_index = 26
+            interior_color_index = 27
+            gearbox_index = 28
+            body_type_index = 29
+            hp_index = 30
+            drive_index = 31
+            options_checked_at_index = 32
+            personal_score_index = 33
+            watchlist_match_index = 34
+            telegram_sent_index = 35
+            telegram_sent_at_index = 36
+            roof_color_index = 37
+            sold_index = 38
+            sold_at_index = 39
+        else:
+            color_index = 26
+            color_detail_index = 27
+            upholstery_index = 28
+            interior_color_index = 29
+            gearbox_index = 30
+            body_type_index = 31
+            hp_index = 32
+            drive_index = 33
+            options_checked_at_index = 34
+            personal_score_index = 35
+            watchlist_match_index = 36
+            telegram_sent_index = 37
+            telegram_sent_at_index = 38
+            roof_color_index = 39
+            sold_index = 24
+            sold_at_index = 25
 
-        self.gearbox = row[30] if len(row) > 30 else ""
-        self.body_type = row[31] if len(row) > 31 else ""
+        self.sold = row[sold_index] if len(row) > sold_index else 0
+        self.sold_at = row[sold_at_index] if len(row) > sold_at_index else None
+        self.color = row[color_index] if len(row) > color_index else ""
+        self.color_detail = row[color_detail_index] if len(row) > color_detail_index else ""
 
-        self.hp = row[32] if len(row) > 32 else ""
-        self.drive = row[33] if len(row) > 33 else ""
-        self.options_checked_at = row[34] if len(row) > 34 else None
+        self.upholstery = row[upholstery_index] if len(row) > upholstery_index else ""
+        self.interior_color = row[interior_color_index] if len(row) > interior_color_index else ""
+        self.roof_color = row[roof_color_index] if len(row) > roof_color_index else ""
 
-        self.personal_score = row[35] if len(row) > 35 else 0
-        self.watchlist_match = row[36] if len(row) > 36 else 0
+        self.gearbox = row[gearbox_index] if len(row) > gearbox_index else ""
+        self.body_type = row[body_type_index] if len(row) > body_type_index else ""
 
-        self.telegram_sent = row[37] if len(row) > 37 else 0
-        self.telegram_sent_at = row[38] if len(row) > 38 else None
+        self.hp = row[hp_index] if len(row) > hp_index else ""
+        self.drive = row[drive_index] if len(row) > drive_index else ""
+        self.options_checked_at = row[options_checked_at_index] if len(row) > options_checked_at_index else None
+
+        self.personal_score = row[personal_score_index] if len(row) > personal_score_index else 0
+        self.watchlist_match = row[watchlist_match_index] if len(row) > watchlist_match_index else 0
+
+        self.telegram_sent = row[telegram_sent_index] if len(row) > telegram_sent_index else 0
+        self.telegram_sent_at = row[telegram_sent_at_index] if len(row) > telegram_sent_at_index else None
 
 
     def summary(self):
