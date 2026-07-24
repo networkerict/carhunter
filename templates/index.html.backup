@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+
+<title>AutoHunter Dashboard</title>
+
+<link rel="stylesheet" href="/static/style.css">
+
+</head>
+
+
+<body>
+
+
+<h1>🚗 AutoHunter Dashboard</h1>
+
+
+<div class="layout">
+
+
+<div class="sidebar">
+
+
+<h2>Filters</h2>
+
+
+<form method="get">
+
+
+<label>Zoeken</label>
+
+<input 
+type="text"
+name="search"
+value="{{filters.get('search','')}}">
+
+
+<label>Max prijs</label>
+
+<input
+type="number"
+name="price"
+value="{{filters.get('price','')}}">
+
+
+<label>Min bouwjaar</label>
+
+<input
+type="number"
+name="year"
+value="{{filters.get('year','')}}">
+
+
+<label>Max KM</label>
+
+<input
+type="number"
+name="km"
+value="{{filters.get('km','')}}">
+
+
+<label>Min score</label>
+
+<input
+type="number"
+name="score"
+value="{{filters.get('score','')}}">
+
+
+<button>
+🔎 Filter
+</button>
+
+
+</form>
+
+
+<a href="/" class="reset">
+♻ Herstel alle filters
+</a>
+
+
+<h3>Actieve filters</h3>
+
+
+{% if filters %}
+
+<ul>
+
+{% for key,value in filters.items() %}
+
+{% if value %}
+
+<li>
+✓ {{key}} : {{value}}
+</li>
+
+{% endif %}
+
+{% endfor %}
+
+</ul>
+
+
+{% else %}
+
+Geen filters actief
+
+
+{% endif %}
+
+
+</div>
+
+
+
+
+<div class="content">
+
+
+<h2>
+Resultaten: {{cars|length}}
+</h2>
+
+
+<table>
+
+
+<tr>
+
+<th>
+Auto
+</th>
+
+<th>
+Score
+</th>
+
+<th>
+Prijs
+</th>
+
+<th>
+Jaar
+</th>
+
+<th>
+KM
+</th>
+
+<th>
+Opties
+</th>
+
+</tr>
+
+
+
+{% for car in cars %}
+
+
+<tr>
+
+
+<td>
+
+<a href="/car/{{car.id}}">
+{{car.title}}
+</a>
+
+</td>
+
+
+<td class="score">
+
+{{car.final_score}}
+
+</td>
+
+
+<td>
+
+€{{car.price}}
+
+</td>
+
+
+<td>
+
+{{car.year}}
+
+</td>
+
+
+<td>
+
+{{car.km}}
+
+</td>
+
+
+<td>
+
+{{car.options_found}}
+
+</td>
+
+
+</tr>
+
+
+{% endfor %}
+
+
+</table>
+
+
+</div>
+
+
+</div>
+
+
+</body>
+
+</html>

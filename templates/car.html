@@ -1,0 +1,209 @@
+{% extends "base.html" %}
+
+{% block title %}
+{{ car.title }}
+{% endblock %}
+
+
+{% block content %}
+
+<h1>{{ car.title }}</h1>
+
+
+<div class="car-box">
+
+<h2>Score</h2>
+
+<div class="car-score">
+{{ car.final_score }}
+</div>
+
+
+<p>
+
+Car:
+{{ car.car_score }}
+
+<br>
+
+Value:
+{{ car.value_score }}
+
+<br>
+
+Options:
+{{ car.options_score }}
+
+<br>
+
+Premium:
+{{ car.premium_score }}
+
+</p>
+
+
+</div>
+
+
+<div class="car-box">
+
+<h2>Auto</h2>
+
+Prijs:
+€{{ car.price }}
+
+<br>
+
+Jaar:
+{{ car.year }}
+
+<br>
+
+KM:
+{{ car.km }}
+
+
+</div>
+
+
+<div class="car-box">
+
+<h2>Specificaties</h2>
+
+{% if car.body_type %}
+Carrosserie:
+{{ car.body_type }}
+
+<br>
+{% endif %}
+
+
+{% if car.hp %}
+Vermogen:
+{{ car.hp }} pk
+
+<br>
+{% endif %}
+
+
+{% if car.drive %}
+Aandrijving:
+{{ car.drive }}
+
+<br>
+{% endif %}
+
+
+{% if car.gearbox %}
+Versnellingsbak:
+{{ car.gearbox }}
+
+<br>
+{% endif %}
+
+</div>
+
+
+<div class="car-box">
+
+<h2>Kleur & interieur</h2>
+
+
+{% if car.color %}
+Exterieur:
+{{ car.color }}
+
+<br>
+{% endif %}
+
+
+{% if car.color_detail %}
+Fabriekskleur:
+{{ car.color_detail }}
+
+<br>
+{% endif %}
+
+
+{% if car.roof_color %}
+Dak:
+{{ car.roof_color }}
+
+<br>
+{% endif %}
+
+
+{% if car.upholstery %}
+Bekleding:
+{{ car.upholstery }}
+
+<br>
+{% endif %}
+
+
+{% if car.interior_color %}
+Interieurkleur:
+{{ car.interior_color }}
+
+<br>
+{% endif %}
+
+
+</div>
+
+
+
+<div class="car-box">
+
+
+<h2>Opties</h2>
+
+
+<ul>
+
+{% for option in car.options_found.split(",")|sort %}
+
+<li>
+✓ {{ option }}
+</li>
+
+{% endfor %}
+
+</ul>
+
+
+</div>
+
+
+
+<div class="car-box">
+
+<a href="/car/{{car.id}}">
+Bekijk details
+</a>
+
+&nbsp; | &nbsp;
+
+<a href="/car/{{car.id}}/debug-score"
+class="ranking-button">
+
+📊 Score uitleg
+
+</a>
+
+&nbsp; | &nbsp;
+
+<a href="{{ car.url }}" target="_blank">
+Open AutoScout24
+</a>
+
+
+</div>
+
+
+</body>
+
+</html>
+
+
+{% endblock %}

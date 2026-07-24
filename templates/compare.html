@@ -1,0 +1,511 @@
+{% extends "base.html" %}
+
+{% block title %}
+Auto vergelijking
+{% endblock %}
+
+
+{% block content %}
+
+<h2>⚖️ Auto vergelijking</h2>
+
+
+{% if recommendation %}
+
+<div class="car-box">
+
+
+<h2>
+{{ recommendation.headline }}
+</h2>
+
+
+<h3>
+🏆 {{ recommendation.winner.title }}
+</h3>
+
+
+<p>
+
+<b>ID:</b>
+{{ recommendation.winner.id }}
+
+<br>
+
+<b>Prijs:</b>
+€{{ recommendation.winner.price }}
+
+<br>
+
+<b>Score:</b>
+⭐ {{ recommendation.winner.final_score }}
+
+<br>
+
+<b>Vermogen:</b>
+{{ recommendation.winner.hp }} pk
+
+<br>
+
+<b>Bouwjaar:</b>
+{{ recommendation.winner.year }}
+
+<br>
+
+<b>KM:</b>
+{{ recommendation.winner.km }}
+
+<br>
+
+<b>Aandrijving:</b>
+{{ recommendation.winner.drive }}
+
+<br>
+
+<b>Carrosserie:</b>
+{{ recommendation.winner.body_type }}
+
+<br>
+
+<b>Kleur:</b>
+{{ recommendation.winner.color }}
+
+</p>
+
+
+<p>
+<a href="{{ recommendation.winner.url }}" target="_blank">
+🔗 Bekijk advertentie
+</a>
+</p>
+
+
+<p>
+{{ recommendation.summary }}
+</p>
+
+
+{% if recommendation.recommendation_reasons %}
+
+<p><b>Waarom:</b></p>
+
+<ul>
+
+{% for reason in recommendation.recommendation_reasons %}
+
+<li>
+✓ {{ reason }}
+</li>
+
+{% endfor %}
+
+</ul>
+
+{% endif %}
+
+
+{% if recommendation.value_choice and recommendation.value_choice.id != recommendation.winner.id %}
+
+<hr>
+
+<p>
+
+💡 <b>Afweging:</b>
+
+<br><br>
+
+De winnaar kost
+<b>€{{ recommendation.price_difference }}</b>
+meer,
+
+maar levert
+<b>+{{ recommendation.score_difference }}</b>
+punten extra score.
+
+</p>
+
+
+{% if recommendation.premium_advantages %}
+
+<p>
+De meerprijs komt vooral door:
+</p>
+
+<ul>
+
+{% for item in recommendation.premium_advantages %}
+
+<li>
+✓ {{ item.option }}
+</li>
+
+{% endfor %}
+
+</ul>
+
+{% endif %}
+
+
+<hr>
+
+<p>
+
+💰 <b>Slim alternatief:</b>
+
+<br>
+
+{{ recommendation.value_choice.title }}
+
+<br>
+
+<b>ID:</b>
+{{ recommendation.value_choice.id }}
+
+<br>
+
+<b>Prijs:</b>
+€{{ recommendation.value_choice.price }}
+
+<br>
+
+<b>Score:</b>
+⭐ {{ recommendation.value_choice.final_score }}
+
+<br>
+
+<b>Vermogen:</b>
+{{ recommendation.value_choice.hp }} pk
+
+<br>
+
+<b>Bouwjaar:</b>
+{{ recommendation.value_choice.year }}
+
+<br>
+
+<b>KM:</b>
+{{ recommendation.value_choice.km }}
+
+<br>
+
+<b>Aandrijving:</b>
+{{ recommendation.value_choice.drive }}
+
+<br>
+
+Prijs:
+€{{ recommendation.value_choice.price }}
+
+<br>
+
+Score:
+⭐ {{ recommendation.value_choice.final_score }}
+
+<br>
+
+Bouwjaar:
+{{ recommendation.value_choice.year }}
+
+<br>
+
+KM:
+{{ recommendation.value_choice.km }}
+
+<br>
+
+{% if recommendation.price_difference %}
+
+<br>
+
+💰 Verschil:
+€{{ recommendation.price_difference }}
+
+<br>
+
+{% endif %}
+
+<a href="{{ recommendation.value_choice.url }}" target="_blank">
+🔗 Bekijk alternatief
+</a>
+
+</p>
+
+{% endif %}
+
+
+</div>
+
+{% endif %}
+
+
+
+<table border="1" cellpadding="8">
+
+<tr>
+<th></th>
+
+{% for car in cars %}
+
+<th>
+
+<a href="{{ car.url }}" target="_blank">
+{{ car.title }}
+</a>
+
+<br>
+
+<small>
+ID: {{ car.id }}
+</small>
+
+<br>
+
+€{{ car.price }}
+
+<br>
+
+⭐ {{ car.final_score }}
+
+<br>
+
+{{ car.hp }} pk
+
+</th>
+
+{% endfor %}
+
+</tr>
+
+
+<tr>
+<td>Prijs</td>
+
+{% for car in cars %}
+<td>€{{ car.price }}</td>
+{% endfor %}
+
+</tr>
+
+
+<tr>
+<td>Persoonlijke score</td>
+
+{% for car in cars %}
+<td>{{ car.personal_score }}</td>
+{% endfor %}
+
+</tr>
+
+
+<tr>
+<td>Final score</td>
+
+{% for car in cars %}
+<td>{{ car.final_score }}</td>
+{% endfor %}
+
+</tr>
+
+
+<tr>
+<td>Deal score</td>
+
+{% for car in cars %}
+<td>{{ car.deal_score }}</td>
+{% endfor %}
+
+</tr>
+
+
+<tr>
+<td>Options score</td>
+
+{% for car in cars %}
+<td>{{ car.options_score }}</td>
+{% endfor %}
+
+</tr>
+
+
+<tr>
+<td>Premium score</td>
+
+{% for car in cars %}
+<td>{{ car.premium_score }}</td>
+{% endfor %}
+
+</tr>
+
+
+<tr>
+<td>PK</td>
+
+{% for car in cars %}
+<td>{{ car.hp }}</td>
+{% endfor %}
+
+</tr>
+
+
+<tr>
+<td>KM</td>
+
+{% for car in cars %}
+<td>{{ car.km }}</td>
+{% endfor %}
+
+</tr>
+
+
+<tr>
+<td>Carrosserie</td>
+
+{% for car in cars %}
+<td>{{ car.body_type }}</td>
+{% endfor %}
+
+</tr>
+
+
+<tr>
+<td>Motor</td>
+
+{% for car in cars %}
+<td>{{ car.title }}</td>
+{% endfor %}
+
+</tr>
+
+
+<tr>
+<td>Aandrijving</td>
+
+{% for car in cars %}
+<td>{{ car.drive }}</td>
+{% endfor %}
+
+</tr>
+
+
+<tr>
+<td>Versnellingsbak</td>
+
+{% for car in cars %}
+<td>{{ car.gearbox }}</td>
+{% endfor %}
+
+</tr>
+
+
+<tr>
+<td>Kleur</td>
+
+{% for car in cars %}
+<td>{{ car.color }}</td>
+{% endfor %}
+
+</tr>
+
+
+<tr>
+<td>Dak</td>
+
+{% for car in cars %}
+<td>{{ car.roof_color }}</td>
+{% endfor %}
+
+</tr>
+
+
+<tr>
+<td>Interieur</td>
+
+{% for car in cars %}
+<td>{{ car.upholstery }}</td>
+{% endfor %}
+
+</tr>
+
+
+</table>
+
+
+<hr>
+
+
+<h2>🔧 Opties vergelijking</h2>
+
+
+<table border="1" cellpadding="8">
+
+
+<tr>
+
+<th>Optie</th>
+
+{% for car in cars %}
+
+<th>
+
+<a href="{{ car.url }}" target="_blank">
+{{ car.title }}
+</a>
+
+<br>
+
+<small>
+ID: {{ car.id }}
+</small>
+
+<br>
+
+€{{ car.price }}
+
+<br>
+
+⭐ {{ car.final_score }}
+
+<br>
+
+{{ car.hp }} pk
+
+</th>
+
+{% endfor %}
+
+</tr>
+
+
+{% for option in option_matrix %}
+
+<tr>
+
+<td>
+{{ option }}
+</td>
+
+
+{% for car in cars %}
+
+<td>
+
+{% if option in car.options_found %}
+✓
+{% else %}
+-
+{% endif %}
+
+</td>
+
+{% endfor %}
+
+
+</tr>
+
+{% endfor %}
+
+
+</table>
+
+
+{% endblock %}

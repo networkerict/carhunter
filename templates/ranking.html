@@ -1,0 +1,161 @@
+{% extends "base.html" %}
+
+{% block title %}
+AutoHunter Ranking
+{% endblock %}
+
+
+{% block content %}
+
+<div class="ranking-page-header">
+
+<h2>🏆 AutoHunter Ranking Top 10</h2>
+
+<a href="/rescore" class="ranking-button">
+🔄 Scores opnieuw berekenen
+</a>
+
+</div>
+
+
+<form method="get" action="/compare">
+
+<div class="compare-toolbar">
+
+<button type="submit" class="ranking-button">
+⚖️ Vergelijk geselecteerde auto's
+</button>
+
+</div>
+
+
+<div class="ranking-grid">
+
+
+{% for car in cars %}
+
+
+<div class="card ranking-card
+{% if loop.index == 1 %}winner{% endif %}
+{% if loop.index == 2 %}second{% endif %}
+{% if loop.index == 3 %}third{% endif %}
+">
+
+
+<div class="rank">
+
+{% if loop.index == 1 %}
+🥇
+{% elif loop.index == 2 %}
+🥈
+{% elif loop.index == 3 %}
+🥉
+{% else %}
+#{{ loop.index }}
+{% endif %}
+
+</div>
+
+
+<h2>
+<input 
+type="checkbox"
+name="ids"
+value="{{ car.id }}">
+
+{{ car.title }}
+</h2>
+
+
+<div class="score-badge">
+❤️ Persoonlijke score {{ car.personal_score }}
+<br>
+⭐ Basis score {{ car.final_score }}
+</div>
+
+
+<p>
+
+💰 <b>€{{ car.price }}</b>
+<br>
+
+📅 {{ car.year }}
+
+<br>
+
+🚗 {{ car.km }} km
+
+</p>
+
+
+
+<hr>
+
+
+<h3>Score breakdown</h3>
+
+
+<div class="score-details">
+
+Car: {{ car.car_score }}
+<br>
+
+Value: {{ car.value_score }}
+<br>
+
+Options: {{ car.options_score }}
+<br>
+
+Premium: {{ car.premium_score }}
+
+</div>
+
+
+
+{% if car.options_found %}
+
+<hr>
+
+<h3>Opties</h3>
+
+<div class="options-tags">
+
+{% for option in car.options_found.split(",")|sort %}
+
+<span>
+✓ {{ option.strip() }}
+</span>
+
+{% endfor %}
+
+</div>
+
+{% endif %}
+
+
+<br>
+
+
+<a class="detail-button"
+href="/car/{{ car.id }}">
+Bekijk details →
+</a>
+
+
+</div>
+
+
+{% endfor %}
+
+
+</div>
+
+</form>
+
+
+</body>
+
+</html>
+
+
+{% endblock %}

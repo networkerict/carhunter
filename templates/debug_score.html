@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+
+<title>Score uitleg</title>
+
+<link rel="stylesheet" href="/static/style.css">
+
+</head>
+
+
+<body>
+
+
+<div class="header">
+
+<h1>
+📊 Score uitleg
+</h1>
+
+</div>
+
+
+<div class="card">
+
+
+<h2>
+{{car.title}}
+</h2>
+
+
+<p>
+Prijs: €{{car.price}}<br>
+KM: {{car.km}}<br>
+Jaar: {{car.year}}
+</p>
+
+
+
+<hr>
+
+
+<h2>Car score: {{car_score}}</h2>
+
+<ul>
+
+{% for item in car_breakdown %}
+
+<li>
++{{item.points}} {{item.reason}}
+</li>
+
+{% endfor %}
+
+</ul>
+
+
+
+<h2>Value score: {{value_score}}</h2>
+
+<ul>
+
+{% for item in value_breakdown %}
+
+<li>
++{{item.points}} {{item.reason}}
+</li>
+
+{% endfor %}
+
+</ul>
+
+
+
+<h2>
+Options score: {{options_score}}
+</h2>
+
+
+<ul>
+
+{% for item in option_breakdown %}
+
+<li>
++{{item.points}} {{item.option}}
+</li>
+
+{% endfor %}
+
+</ul>
+
+
+
+<h2>
+Premium score: {{premium_score}}
+</h2>
+
+<ul>
+
+{% for item in premium_breakdown %}
+
+<li>
++{{item.points}} {{item.reason}}
+</li>
+
+{% endfor %}
+
+</ul>
+
+
+
+<hr>
+
+
+<a href="/car/{{car.id}}">
+← Terug naar auto
+</a>
+
+
+</div>
+
+
+</body>
+
+</html>

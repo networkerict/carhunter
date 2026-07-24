@@ -1,0 +1,269 @@
+from flask import Flask, render_template, redirect
+import database
+import debug
+
+app = Flask(__name__)
+
+
+@app.route("/")
+def index():
+
+    from flask import request
+
+
+    cars = database.search_cars(
+
+        max_price=request.args.get(
+            "price",
+            type=int
+        ),
+
+        min_year=request.args.get(
+            "year",
+            type=int
+        ),
+
+        max_km=request.args.get(
+            "km",
+            type=int
+        ),
+
+        min_score=request.args.get(
+            "score",
+            type=int
+        ),
+
+        search=request.args.get(
+            "search"
+        ),
+
+        colors=request.args.getlist(
+            "color"
+        ),
+
+        color_details=request.args.getlist(
+            "color_detail"
+        ),
+
+        options=request.args.getlist("option")
+
+    )
+
+
+    active_filters = {}
+
+    if request.args.get("price"):
+        active_filters["Prijs"] = f"< €{request.args.get('price')}"
+
+    if request.args.get("year"):
+        active_filters["Bouwjaar"] = f"> {request.args.get('year')}"
+
+    if request.args.get("km"):
+        active_filters["KM"] = f"< {request.args.get('km')}"
+
+    if request.args.get("score"):
+        active_filters["Score"] = f"> {request.args.get('score')}"
+
+
+    if request.args.getlist("color"):
+        active_filters["Kleur"] = ", ".join(
+            request.args.getlist("color")
+        )
+
+    if request.args.getlist("option"):
+        active_filters["Opties"] = ", ".join(
+            request.args.getlist("option")
+        )
+
+
+    return render_template(
+        "index.html",
+        cars=cars,
+        active_filters=active_filters,
+        filters=request.args,
+        options=database.get_option_counts(),
+        color_details=database.get_color_detail_counts()
+    )
+
+
+@app.route("/car/<int:id>")
+def car_detail(id):
+
+    car = database.get_car(id)
+
+    return render_template(
+        "car.html",
+        car=car
+    )
+
+@app.route("/car/<int:id>/debug-score")
+def debug_score_page(id):
+
+    import scoring
+    import options
+    import premium
+
+
+    car = database.get_car(id)
+
+    if not car:
+        return "Car not found", 404
+
+
+    car_score, car_breakdown = scoring.calculate_car_score(
+        car,
+        explain=True
+    )
+
+
+    value_score, value_breakdown = scoring.calculate_value_score(
+        car,
+        explain=True
+    )
+
+
+    found, option_score, option_breakdown = options.analyze_options(
+        car,
+        explain=True
+    )
+
+
+    premium_score, premium_breakdown = premium.analyze_premium(
+        car,
+        explain=True
+    )
+
+
+    return render_template(
+        "debug_score.html",
+        car=car,
+        car_score=car_score,
+        car_breakdown=car_breakdown,
+        value_score=value_score,
+        value_breakdown=value_breakdown,
+        options=found,
+        options_score=option_score,
+        option_breakdown=option_breakdown,
+        premium_score=premium_score,
+        premium_breakdown=premium_breakdown
+    )
+
+
+@app.route("/compare")
+def compare():
+
+    from flask import request
+    import comparison
+
+    ids = request.args.getlist("ids")
+
+    cars = []
+
+    for id in ids:
+
+        car = database.get_car(
+            int(id)
+        )
+
+        if car:
+            cars.append(car)
+
+
+    option_matrix = comparison.get_all_options(
+        cars
+    )
+
+    import comparison_intelligence
+    import recommendation_engine
+
+
+    comparison_analysis = (
+        comparison_intelligence.analyze_comparison(
+            cars
+        )
+    )
+
+
+    recommendation = (
+        recommendation_engine.generate_recommendation(
+            cars
+        )
+    )
+
+
+    return render_template(
+        "compare.html",
+        cars=cars,
+        option_matrix=option_matrix,
+        comparison_analysis=comparison_analysis,
+        recommendation=recommendation
+    )
+
+
+@app.route("/dashboard")
+def dashboard():
+
+    import dashboard_data
+
+    data = dashboard_data.get_dashboard_data()
+
+    return render_template(
+        "dashboard.html",
+        data=data
+    )
+
+
+@app.route("/ranking")
+def ranking():
+
+    cars = database.get_ranking(10)
+
+    return render_template(
+        "ranking.html",
+        cars=cars
+    )
+
+@app.route("/deals")
+def deals():
+
+    import debug_deal
+
+    cars = database.get_deals()
+
+    for car in cars:
+
+        score, reasons = debug_deal.explain_deal(car)
+
+        car.deal_reasons = reasons
+
+
+    return render_template(
+        "deals.html",
+        cars=cars
+    )
+
+@app.route("/rescore")
+def rescore():
+
+    import scoring
+
+    debug.info(
+        "Web rescore gestart"
+    )
+
+    scoring.recalculate_scores()
+
+    debug.info(
+        "Web rescore afgerond"
+    )
+
+    return redirect("/ranking")
+
+
+if __name__ == "__main__":
+
+    app.run(
+        host="0.0.0.0",
+        port=5001,
+        debug=False
+    )

@@ -1,0 +1,395 @@
+{% extends "base.html" %}
+
+{% block title %}
+AutoHunter Zoeken
+{% endblock %}
+
+
+{% block content %}
+
+<div class="layout">
+
+
+
+<div class="sidebar">
+
+
+<h2>Filters</h2>
+
+
+<form method="get">
+
+
+<label>Zoeken</label>
+
+<input type="text"
+       name="search"
+       value="{{filters.get('search','')}}">
+
+
+
+<label>Max prijs</label>
+
+<input type="number"
+       name="price"
+       value="{{filters.get('price','')}}">
+
+
+
+<label>Min bouwjaar</label>
+
+<input type="number"
+       name="year"
+       value="{{filters.get('year','')}}">
+
+
+
+<label>Max kilometers</label>
+
+<input type="number"
+       name="km"
+       value="{{filters.get('km','')}}">
+
+
+
+<label>Min score</label>
+
+<input type="number"
+       name="score"
+       value="{{filters.get('score','')}}">
+
+
+
+
+
+<h3>Kleur</h3>
+
+<div class="color-list">
+
+{% set selected_colors = filters.getlist('color') %}
+
+<label>
+<input type="checkbox"
+       name="color"
+       value="zwart"
+       {% if "zwart" in selected_colors %}checked{% endif %}>
+Zwart
+</label>
+
+<label>
+<input type="checkbox"
+       name="color"
+       value="grijs"
+       {% if "grijs" in selected_colors %}checked{% endif %}>
+Grijs
+</label>
+
+<label>
+<input type="checkbox"
+       name="color"
+       value="blauw"
+       {% if "blauw" in selected_colors %}checked{% endif %}>
+Blauw
+</label>
+
+<label>
+<input type="checkbox"
+       name="color"
+       value="groen"
+       {% if "groen" in selected_colors %}checked{% endif %}>
+Groen
+</label>
+
+<label>
+<input type="checkbox"
+       name="color"
+       value="wit"
+       {% if "wit" in selected_colors %}checked{% endif %}>
+Wit
+</label>
+
+<label>
+<input type="checkbox"
+       name="color"
+       value="rood"
+       {% if "rood" in selected_colors %}checked{% endif %}>
+Rood
+</label>
+
+<label>
+<input type="checkbox"
+       name="color"
+       value="bruin"
+       {% if "bruin" in selected_colors %}checked{% endif %}>
+Bruin
+</label>
+
+<label>
+<input type="checkbox"
+       name="color"
+       value="zilver"
+       {% if "zilver" in selected_colors %}checked{% endif %}>
+Zilver
+</label>
+
+</div>
+
+<h3>Specifieke kleur</h3>
+
+<div class="color-list">
+
+{% for color,count in color_details %}
+
+<label>
+
+<input
+type="checkbox"
+name="color_detail"
+value="{{color}}"
+{% if color in filters.getlist('color_detail') %}checked{% endif %}
+>
+
+{{color}} ({{count}})
+
+</label>
+
+{% endfor %}
+
+</div>
+
+
+<h3>Populaire opties</h3>
+
+
+{% for option,count in options %}
+
+
+<div class="checkbox-row">
+
+
+<input
+type="checkbox"
+name="option"
+value="{{option}}"
+{% if option in filters.getlist('option') %}
+checked
+{% endif %}
+>
+
+
+<label>
+{{option}} ({{count}})
+</label>
+
+
+</div>
+
+
+{% endfor %}
+
+
+
+
+<br>
+
+
+<button type="submit">
+Zoeken
+</button>
+
+
+
+<a href="/" class="reset">
+Reset filters
+</a>
+
+
+
+</form>
+
+
+</div>
+
+
+
+
+
+<div class="content">
+
+
+
+{% if active_filters %}
+
+
+<div class="active">
+
+
+<b>Actieve filters:</b>
+
+
+{% for key,value in active_filters.items() %}
+
+
+<span class="tag">
+
+{{key}}: {{value}}
+
+</span>
+
+
+{% endfor %}
+
+
+
+<a href="/" class="reset">
+
+Alles wissen
+
+</a>
+
+
+
+</div>
+
+
+{% endif %}
+
+
+
+
+
+<h2>
+
+{{cars|length}} auto's gevonden
+
+</h2>
+
+
+
+
+{% for car in cars %}
+
+
+
+<div class="car">
+
+
+<h2>
+{{car.title}}
+</h2>
+
+
+
+<div class="score">
+
+Score:
+{{car.final_score}}
+
+</div>
+
+
+
+
+<p>
+💶 {{car.price}} euro
+</p>
+
+
+
+<p>
+🚗 {{car.km}} km
+</p>
+
+
+
+<p>
+📅 {{car.year}}
+</p>
+
+
+
+<p>
+🎨 {{car.color}}
+</p>
+
+
+
+<p>
+⭐ Optiescore:
+{{car.options_score}}
+</p>
+
+<p>
+
+{% if car.hp %}
+<br>
+💪 {{car.hp}} pk
+{% endif %}
+
+{% if car.gearbox %}
+<br>
+⚙️ {{car.gearbox}}
+{% endif %}
+
+{% if car.body_type %}
+<br>
+🚗 {{car.body_type}}
+{% endif %}
+
+{% if car.drive %}
+<br>
+🔩 {{car.drive}}
+{% endif %}
+
+</p>
+
+{% if car.options_found %}
+
+<p>
+🔧 {{ car.options_found.split(",")|sort | join(", ") }}
+{% if car.options_found.split(",")|sort|length > 5 %}
+...
+{% endif %}
+</p>
+
+{% endif %}
+
+
+
+<a href="/car/{{car.id}}">
+
+Bekijk details
+
+</a>
+
+<br><br>
+
+<a href="{{car.url}}" target="_blank">
+
+Open AutoScout24
+
+</a>
+
+
+</div>
+
+
+
+{% endfor %}
+
+
+
+
+</div>
+
+
+
+</div>
+
+
+</body>
+
+</html>
+
+
+{% endblock %}

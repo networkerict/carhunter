@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+
+    <title>
+        {% block title %}
+        AutoHunter v2.9-dev
+        {% endblock %}
+    </title>
+
+    <link rel="stylesheet" href="/static/style.css">
+
+</head>
+
+
+<body>
+
+
+<div class="header">
+
+<h1>🚗 AutoHunter v2.9-dev</h1>
+
+<a href="/" class="ranking-button {% if request.path == '/' %}active{% endif %}">
+🔍 Zoeken
+</a>
+
+<a href="/dashboard" class="ranking-button {% if request.path == '/dashboard' %}active{% endif %}">
+📊 Dashboard
+</a>
+
+<a href="/ranking" class="ranking-button {% if request.path == '/ranking' %}active{% endif %}">
+🏆 Ranking
+</a>
+
+<a href="/deals" class="ranking-button {% if request.path == '/deals' %}active{% endif %}">
+🔥 Deals
+</a>
+
+</div>
+
+
+{% block content %}
+
+{% endblock %}
+
+
+<div class="footer">
+
+AutoHunter v2.9-dev |
+Pipeline powered by AutoHunter AI
+
+</div>
+
+
+</body>
+
+</html>

@@ -1,0 +1,351 @@
+{% extends "base.html" %}
+
+{% block title %}
+AutoHunter Dashboard
+{% endblock %}
+
+
+{% block content %}
+
+<div class="ranking-grid">
+
+
+<div class="ranking-card content">
+
+<h2>📊 Statistieken</h2>
+
+<p>
+Nieuwe auto's vandaag:
+{{ data["today"]|length }}
+</p>
+
+<p>
+Interessante matches:
+{{ data["interesting"]|length }}
+</p>
+
+<p>
+Deals:
+{{ data["deals"]|length }}
+</p>
+
+<p>
+High score auto's:
+{{ data["stats"]["high_score_cars"] }}
+</p>
+
+</div>
+
+
+<div class="ranking-card content">
+
+<h2>⚙️ Laatste AutoHunter run</h2>
+
+{% if data["latest_run"] %}
+
+<p>
+Laatste run:
+<strong>{{ data["latest_run"]["started_at"] }}</strong>
+</p>
+
+<p>
+Status:
+<strong>{{ data["latest_run"]["status"] }}</strong>
+</p>
+
+<p>Nieuwe auto's: {{ data["latest_run"]["new_cars"] }}</p>
+<p>Descriptions bijgewerkt: {{ data["latest_run"]["descriptions_updated"] }}</p>
+<p>Opties geanalyseerd: {{ data["latest_run"]["options_updated"] }}</p>
+<p>Deal scores: {{ data["latest_run"]["deal_scores_updated"] }}</p>
+<p>Alerts: {{ data["latest_run"]["alerts_sent"] }}</p>
+<p>Duur: {{ data["latest_run"]["duration_seconds"] }} seconden</p>
+
+{% if data["latest_run"]["error_message"] %}
+<p>Fout: {{ data["latest_run"]["error_message"] }}</p>
+{% endif %}
+
+{% else %}
+
+<p>Nog geen pipeline-run beschikbaar.</p>
+
+{% endif %}
+
+<details>
+
+<summary>🕓 Pipeline geschiedenis (laatste 10 runs)</summary>
+
+{% if data["recent_runs"] %}
+
+{% for run in data["recent_runs"] %}
+
+<p>
+<strong>{{ run["started_at"] }} — {{ run["status"] }}</strong>
+<br>
+Nieuw: {{ run["new_cars"] }} · Beschrijvingen: {{ run["descriptions_updated"] }} · Opties: {{ run["options_updated"] }}
+<br>
+Deal scores: {{ run["deal_scores_updated"] }} · Alerts: {{ run["alerts_sent"] }} · Duur: {{ run["duration_seconds"] }} sec
+</p>
+
+{% if run["error_message"] %}
+<p>Fout bij run #{{ run["id"] }}: {{ run["error_message"] }}</p>
+{% endif %}
+
+{% endfor %}
+
+{% else %}
+
+<p>Nog geen pipelinegeschiedenis beschikbaar.</p>
+
+{% endif %}
+
+</details>
+
+</div>
+
+
+<div class="ranking-card content">
+
+<h2>🔥 Beste match</h2>
+
+{% if data["interesting"] %}
+
+{% set car = data["interesting"][0] %}
+
+
+<h3>{{ car.title }}</h3>
+
+
+<p>
+⭐ Final score:
+<strong>{{ car.final_score }}</strong>
+</p>
+
+<p>
+❤️ Personal score:
+{{ car.personal_score }}
+</p>
+
+<p>
+🔥 Deal score:
+{{ car.deal_score }}
+</p>
+
+
+<p>
+💰 €{{ car.price }}
+<br>
+📅 {{ car.year }}
+<br>
+🛣️ {{ car.km }} km
+</p>
+
+
+{% if car.color %}
+
+<p>
+🎨 {{ car.color }}
+{% if car.color_detail %}
+- {{ car.color_detail }}
+{% endif %}
+</p>
+
+{% endif %}
+
+
+{% if data["recommendations"].get(car.id) %}
+
+<p>
+🧠 Waarom interessant:
+</p>
+
+<ul>
+
+{% for reason in data["recommendations"].get(car.id) %}
+
+<li>
+{{ reason }}
+</li>
+
+{% endfor %}
+
+</ul>
+
+{% endif %}
+
+
+{% if car.options_found %}
+
+<p>
+🎯 Opties:
+</p>
+
+<div class="options-tags">
+
+{% for option in car.options_found.split(",")|sort %}
+
+<span>
+{{ option.strip() }}
+</span>
+
+{% endfor %}
+
+</div>
+
+{% endif %}
+
+
+{% if car.recommendation %}
+
+<p>
+💡 {{ car.recommendation }}
+</p>
+
+{% endif %}
+
+
+{% if car.price_drop and car.price_drop > 0 %}
+
+<p>
+📉 Prijsdaling:
+€{{ car.price_drop }}
+</p>
+
+{% endif %}
+
+
+<br>
+
+
+<a class="detail-button"
+href="/car/{{ car.id }}">
+Bekijk auto
+</a>
+
+
+<a class="detail-button"
+href="{{ car.url }}"
+target="_blank">
+AutoScout
+</a>
+
+
+{% else %}
+
+<p>
+Geen interessante auto's gevonden.
+</p>
+
+{% endif %}
+
+
+</div>
+
+
+</div>
+
+
+
+
+<h2>🏆 Top ranking</h2>
+
+
+<div class="ranking-grid">
+
+
+{% for car in data["ranking"][:10] %}
+
+
+<div class="ranking-card content">
+
+
+<h3>
+{{ loop.index }}. {{ car.title }}
+</h3>
+
+
+<p>
+⭐ Score:
+<strong>{{ car.final_score }}</strong>
+</p>
+
+
+<p>
+❤️ {{ car.personal_score }}
+|
+🔥 {{ car.deal_score }}
+</p>
+
+
+<p>
+€{{ car.price }}
+<br>
+{{ car.year }} - {{ car.km }} km
+</p>
+
+
+<a class="detail-button"
+href="/car/{{ car.id }}">
+Details
+</a>
+
+
+</div>
+
+
+{% endfor %}
+
+
+</div>
+
+
+
+
+<h2>💰 Deals</h2>
+
+
+<div class="ranking-grid">
+
+
+{% for car in data["deals"][:5] %}
+
+
+<div class="ranking-card content">
+
+
+<h3>
+{{ car.title }}
+</h3>
+
+
+<p>
+🔥 Deal score:
+<strong>{{ car.deal_score }}</strong>
+</p>
+
+
+<p>
+€{{ car.price }}
+</p>
+
+
+<a class="detail-button"
+href="/car/{{ car.id }}">
+Bekijk
+</a>
+
+
+</div>
+
+
+{% endfor %}
+
+
+</div>
+
+
+</body>
+
+</html>
+
+
+{% endblock %}

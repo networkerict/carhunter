@@ -1,0 +1,173 @@
+{% extends "base.html" %}
+
+{% block title %}
+AutoHunter Deals
+{% endblock %}
+
+
+{% block content %}
+
+<div class="summary">
+
+<h2>
+{{cars|length}} koopkansen gevonden
+</h2>
+
+</div>
+
+
+
+<div class="cards">
+
+
+{% for car in cars %}
+
+
+<div class="car-card">
+
+
+<div class="deal-badge">
+
+🔥 Deal score:
+<strong>{{car.deal_score}}</strong>
+
+</div>
+
+
+<h2>
+{{car.title}}
+</h2>
+
+
+
+<p class="price">
+
+💰
+
+<strong>
+€{{"{:,}".format(car.price).replace(",",".")}}
+</strong>
+
+</p>
+
+
+
+{% if car.price_drop %}
+
+<p class="drop">
+
+🔻
+
+Prijsdaling:
+
+<strong>
+€{{"{:,}".format(car.price_drop).replace(",",".")}}
+</strong>
+
+</p>
+
+{% endif %}
+
+
+
+<hr>
+
+
+
+<p>
+
+❤️ Persoonlijke score:
+
+<strong>
+{{car.personal_score}}
+</strong>
+
+</p>
+
+<p>
+
+⭐ Basis score:
+
+<strong>
+{{car.final_score}}
+</strong>
+
+</p>
+
+
+<p>
+
+🎯 Opties:
+
+<strong>
+{{car.options_score}}
+</strong>
+
+</p>
+
+
+
+<p>
+
+📅 {{car.year}}
+
+|
+
+🚗 {{car.km}} km
+
+</p>
+
+
+
+<p>
+
+🎨 {{car.color}}
+
+|
+
+⚡ {{car.hp}} pk
+
+|
+
+🚙 {{car.drive}}
+
+</p>
+
+
+
+{% if car.gearbox %}
+
+<p>
+
+⚙️ {{car.gearbox}}
+
+</p>
+
+{% endif %}
+
+
+
+<a class="ranking-button"
+href="/car/{{car.id}}">
+
+Bekijk auto →
+
+</a>
+
+
+
+</div>
+
+
+{% endfor %}
+
+
+</div>
+
+
+</body>
+
+</html>
+
+
+{% endblock %}
