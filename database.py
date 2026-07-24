@@ -333,6 +333,8 @@ def save_car(car):
             year=excluded.year,
             url=excluded.url,
             last_seen=excluded.last_seen,
+            sold=0,
+            sold_at='',
             color=excluded.color,
             color_detail=excluded.color_detail,
             upholstery=excluded.upholstery,
@@ -482,7 +484,23 @@ def init_database(conn):
         deal_score INTEGER DEFAULT 0,
         options_checked TEXT DEFAULT '',
         description TEXT DEFAULT '',
-        premium_score INTEGER DEFAULT 0
+        premium_score INTEGER DEFAULT 0,
+        sold INTEGER DEFAULT 0,
+        sold_at TEXT DEFAULT '',
+        color TEXT DEFAULT '',
+        color_detail TEXT DEFAULT '',
+        upholstery TEXT DEFAULT '',
+        interior_color TEXT DEFAULT '',
+        gearbox TEXT DEFAULT '',
+        body_type TEXT DEFAULT '',
+        hp INTEGER DEFAULT 0,
+        drive TEXT DEFAULT '',
+        options_checked_at TEXT DEFAULT '',
+        personal_score INTEGER DEFAULT 0,
+        watchlist_match INTEGER DEFAULT 0,
+        telegram_sent INTEGER DEFAULT 0,
+        telegram_sent_at TEXT DEFAULT '',
+        roof_color TEXT DEFAULT ''
     )
     """)
 
@@ -502,6 +520,8 @@ def init_database(conn):
         ("options_checked", "TEXT DEFAULT ''"),
         ("description", "TEXT DEFAULT ''"),
         ("premium_score", "INTEGER DEFAULT 0"),
+        ("sold", "INTEGER DEFAULT 0"),
+        ("sold_at", "TEXT DEFAULT ''"),
     ]
 
     for column, definition in car_columns:
@@ -717,6 +737,7 @@ def search_cars(
     SELECT *
     FROM cars
     WHERE 1=1
+    AND COALESCE(sold, 0) = 0
     """
 
     params = []
@@ -949,6 +970,7 @@ def get_deals(limit=20):
         FROM cars
         WHERE deal_score > 0
         AND watchlist_match = 1
+        AND COALESCE(sold, 0) = 0
         ORDER BY
             personal_score DESC,
             deal_score DESC,
@@ -978,6 +1000,7 @@ def get_unsent_watchlist_matches():
         FROM cars
         WHERE watchlist_match = 1
         AND telegram_sent = 0
+        AND COALESCE(sold, 0) = 0
         ORDER BY
             personal_score DESC,
             final_score DESC
@@ -1008,4 +1031,72 @@ def mark_watchlist_sent(car_id):
 
     conn.commit()
 
+    conn.close()
+
+
+def mark_missing_cars_sold(active_fingerprints):
+
+    conn = get_connection()
+
+    active_fingerprints = [fp for fp in active_fingerprints if fp]
+
+    if not active_fingerprints:
+        conn.execute(
+            """
+            UPDATE cars
+            SET sold = 1,
+                sold_at = datetime('now')
+            WHERE COALESCE(sold, 0) = 0
+            """
+        )
+    else:
+        placeholders = ",".join(["?"] * len(active_fingerprints))
+        conn.execute(
+            f"""
+            UPDATE cars
+            SET sold = 1,
+                sold_at = datetime('now')
+            WHERE fingerprint NOT IN ({placeholders})
+            AND COALESCE(sold, 0) = 0
+            """,
+            active_fingerprints
+        )
+
+    conn.commit()
+    conn.close()
+
+
+def mark_car_active(car_id):
+
+    conn = get_connection()
+
+    conn.execute(
+        """
+        UPDATE cars
+        SET sold = 0,
+            sold_at = ''
+        WHERE id = ?
+        """,
+        (car_id,)
+    )
+
+    conn.commit()
+    conn.close()
+
+
+def mark_car_active(car_id):
+
+    conn = get_connection()
+
+    conn.execute(
+        """
+        UPDATE cars
+        SET sold = 0,
+            sold_at = ''
+        WHERE id = ?
+        """,
+        (car_id,)
+    )
+
+    conn.commit()
     conn.close()
