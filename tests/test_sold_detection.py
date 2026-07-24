@@ -74,6 +74,50 @@ class SoldDetectionTests(unittest.TestCase):
         reappeared = next(car for car in database.get_all_cars() if car.fingerprint == "b-fingerprint")
         self.assertEqual(reappeared.sold, 0)
 
+    def test_save_car_updates_existing_autoscout_id_without_duplicate(self):
+        first = {
+            "id": 123,
+            "fingerprint": "fingerprint-one",
+            "title": "Audi A5",
+            "price": 25000,
+            "km": 50000,
+            "year": "2020",
+            "url": "https://example.com/one",
+            "color": "blauw",
+            "color_detail": "Navarra Blau",
+            "upholstery": "",
+            "interior_color": "",
+            "gearbox": "",
+            "body_type": "",
+            "hp": 184,
+            "drive": "",
+        }
+        second = {
+            "id": 123,
+            "fingerprint": "fingerprint-two",
+            "title": "Audi A5 Cabrio",
+            "price": 30000,
+            "km": 60000,
+            "year": "2021",
+            "url": "https://example.com/two",
+            "color": "zwart",
+            "color_detail": "Schwarz",
+            "upholstery": "",
+            "interior_color": "",
+            "gearbox": "",
+            "body_type": "",
+            "hp": 204,
+            "drive": "",
+        }
+
+        database.save_car(first)
+        database.save_car(second)
+
+        cars = database.get_all_cars()
+        self.assertEqual(len(cars), 1)
+        self.assertEqual(cars[0].fingerprint, "fingerprint-two")
+        self.assertEqual(cars[0].title, "Audi A5 Cabrio")
+
     def test_inventory_counts_include_active_new_and_sold(self):
         active_car = {
             "fingerprint": "active-fingerprint",

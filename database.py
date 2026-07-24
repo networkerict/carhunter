@@ -257,127 +257,166 @@ def update_car_scores(
         conn.close()
 def save_car(car):
 
-    conn = get_connection()
+    conn = None
 
-    existing = conn.execute(
-        """
-        SELECT id, price
-        FROM cars
-        WHERE fingerprint = ?
-        """,
-        (
-            car.get("fingerprint"),
-        )
-    ).fetchone()
+    try:
+        conn = get_connection()
 
+        autoscout_id = car.get("id") or car.get("autoscout_id")
+        fingerprint = car.get("fingerprint")
 
-    is_new = existing is None
+        existing = conn.execute(
+            """
+            SELECT id, price
+            FROM cars
+            WHERE fingerprint = ?
+            OR autoscout_id = ?
+            ORDER BY id
+            LIMIT 1
+            """,
+            (
+                fingerprint,
+                autoscout_id,
+            )
+        ).fetchone()
 
-    price_drop = 0
-    last_price = existing[1] if existing else None
-    alert = 0
+        is_new = existing is None
 
-    if existing:
+        price_drop = 0
+        last_price = existing[1] if existing else None
+        alert = 0
 
-        old_price = existing[1]
-        new_price = car.get("price")
+        if existing:
 
-        if old_price and new_price and new_price < old_price:
+            old_price = existing[1]
+            new_price = car.get("price")
 
-            last_price = old_price
-            price_drop = old_price - new_price
-            alert = 1
+            if old_price and new_price and new_price < old_price:
 
+                last_price = old_price
+                price_drop = old_price - new_price
+                alert = 1
 
-    from datetime import datetime
+        from datetime import datetime
 
-    now = datetime.now().isoformat()
+        now = datetime.now().isoformat()
 
+        if existing:
+            conn.execute(
+                """
+                UPDATE cars
+                SET
+                    autoscout_id = ?,
+                    fingerprint = ?,
+                    title = ?,
+                    price = ?,
+                    km = ?,
+                    year = ?,
+                    url = ?,
+                    last_seen = ?,
+                    sold = 0,
+                    sold_at = '',
+                    color = ?,
+                    color_detail = ?,
+                    upholstery = ?,
+                    interior_color = ?,
+                    gearbox = ?,
+                    body_type = ?,
+                    hp = ?,
+                    drive = ?,
+                    last_price = ?,
+                    price_drop = ?,
+                    alert = ?
+                WHERE id = ?
+                """,
+                (
+                    autoscout_id,
+                    fingerprint,
+                    car.get("title"),
+                    car.get("price"),
+                    car.get("km"),
+                    car.get("year"),
+                    car.get("url"),
+                    now,
+                    car.get("color",""),
+                    car.get("color_detail",""),
+                    car.get("upholstery",""),
+                    car.get("interior_color",""),
+                    car.get("gearbox",""),
+                    car.get("body_type",""),
+                    car.get("hp",0),
+                    car.get("drive",""),
+                    last_price,
+                    price_drop,
+                    alert,
+                    existing[0]
+                )
+            )
+        else:
+            conn.execute(
+                """
+                INSERT INTO cars
+                (
+                    autoscout_id,
+                    fingerprint,
+                    title,
+                    price,
+                    km,
+                    year,
+                    url,
+                    first_seen,
+                    last_seen,
+                    color,
+                    color_detail,
+                    upholstery,
+                    interior_color,
+                    gearbox,
+                    body_type,
+                    hp,
+                    drive,
+                    last_price,
+                    price_drop,
+                    alert
+                )
 
-    conn.execute(
-        """
-        INSERT INTO cars
-        (
-            autoscout_id,
-            fingerprint,
-            title,
-            price,
-            km,
-            year,
-            url,
-            first_seen,
-            last_seen,
-            color,
-            color_detail,
-            upholstery,
-            interior_color,
-            gearbox,
-            body_type,
-            hp,
-            drive,
-            last_price,
-            price_drop,
-            alert
-        )
+                VALUES
+                (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    autoscout_id,
+                    fingerprint,
+                    car.get("title"),
+                    car.get("price"),
+                    car.get("km"),
+                    car.get("year"),
+                    car.get("url"),
+                    now,
+                    now,
+                    car.get("color",""),
+                    car.get("color_detail",""),
+                    car.get("upholstery",""),
+                    car.get("interior_color",""),
+                    car.get("gearbox",""),
+                    car.get("body_type",""),
+                    car.get("hp",0),
+                    car.get("drive",""),
+                    last_price,
+                    price_drop,
+                    alert
+                )
+            )
 
-        VALUES
-        (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        conn.commit()
+        return is_new
 
-        ON CONFLICT(fingerprint)
+    except Exception:
+        if conn is not None:
+            conn.rollback()
+        raise
 
-        DO UPDATE SET
-
-            title=excluded.title,
-            price=excluded.price,
-            km=excluded.km,
-            year=excluded.year,
-            url=excluded.url,
-            last_seen=excluded.last_seen,
-            sold=0,
-            sold_at='',
-            color=excluded.color,
-            color_detail=excluded.color_detail,
-            upholstery=excluded.upholstery,
-            interior_color=excluded.interior_color,
-            gearbox=excluded.gearbox,
-            body_type=excluded.body_type,
-            hp=excluded.hp,
-            drive=excluded.drive,
-            last_price=excluded.last_price,
-            price_drop=excluded.price_drop,
-            alert=excluded.alert
-
-        """,
-        (
-            car.get("id"),
-            car.get("fingerprint"),
-            car.get("title"),
-            car.get("price"),
-            car.get("km"),
-            car.get("year"),
-            car.get("url"),
-            now,
-            now,
-            car.get("color",""),
-            car.get("color_detail",""),
-            car.get("upholstery",""),
-            car.get("interior_color",""),
-            car.get("gearbox",""),
-            car.get("body_type",""),
-            car.get("hp",0),
-            car.get("drive",""),
-            last_price,
-            price_drop,
-            alert
-        )
-
-    )
-
-
-    conn.commit()
-    conn.close()
-
-    return is_new
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 
