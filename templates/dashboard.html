@@ -156,7 +156,7 @@ Deal scores: {{ run["deal_scores_updated"] }} · Alerts: {{ run["alerts_sent"] }
 
 
 <p>
-💰 €{{ car.price }}
+💰 {{ format_currency(car.price) }}
 <br>
 📅 {{ car.year }}
 <br>
@@ -231,7 +231,7 @@ Deal scores: {{ run["deal_scores_updated"] }} · Alerts: {{ run["alerts_sent"] }
 
 <p>
 📉 Prijsdaling:
-€{{ car.price_drop }}
+{{ format_currency(car.price_drop) }}
 </p>
 
 {% endif %}
@@ -301,7 +301,7 @@ Geen interessante auto's gevonden.
 
 
 <p>
-€{{ car.price }}
+{{ format_currency(car.price) }}
 <br>
 {{ car.year }} - {{ car.km }} km
 </p>
@@ -348,7 +348,7 @@ Details
 
 
 <p>
-€{{ car.price }}
+{{ format_currency(car.price) }}
 </p>
 
 

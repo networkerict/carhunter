@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+
+{% block title %}
+Data Quality Dashboard
+{% endblock %}
+
+{% block content %}
+<h1>Data Quality Dashboard</h1>
+
+<div class="ranking-grid">
+  <div class="ranking-card">
+    <h2>Database Summary</h2>
+    <p><strong>Total vehicles:</strong> {{ summary.total_vehicles }}</p>
+    <p><strong>Complete vehicles:</strong> {{ summary.complete_vehicles }}</p>
+    <p><strong>Incomplete vehicles:</strong> {{ summary.incomplete_vehicles }}</p>
+    <p><strong>Missing descriptions:</strong> {{ summary.missing_descriptions }}</p>
+    <p><strong>Missing options:</strong> {{ summary.missing_options }}</p>
+    <p><strong>Missing specifications:</strong> {{ summary.missing_specifications }}</p>
+    <p><strong>Repairable issues:</strong> {{ summary.repairable_issues }}</p>
+    <p><strong>Repaired today:</strong> {{ summary.repaired_today }}</p>
+  </div>
+  <div class="ranking-card">
+    <h2>Overall health</h2>
+    <p>{{ summary.overall_health }}%</p>
+  </div>
+  <div class="ranking-card">
+    <h2>Historical completeness</h2>
+    <p>{{ summary.historical_completeness }}%</p>
+  </div>
+  <div class="ranking-card">
+    <h2>Today's imports</h2>
+    <p>{{ summary.todays_imports }}</p>
+  </div>
+  <div class="ranking-card">
+    <h2>Today's updated vehicles</h2>
+    <p>{{ summary.todays_updated_vehicles }}</p>
+  </div>
+  <div class="ranking-card">
+    <h2>Last pipeline run</h2>
+    <p>{{ summary.last_pipeline_run or '—' }}</p>
+  </div>
+  <div class="ranking-card">
+    <h2>Last backfill run</h2>
+    <p>{{ summary.last_backfill_run or '—' }}</p>
+  </div>
+  <div class="ranking-card">
+    <h2>Last repair run</h2>
+    <p>{{ summary.last_repair_run.created_at if summary.last_repair_run else '—' }}</p>
+  </div>
+</div>
+
+<h2>Field coverage</h2>
+<table>
+  <tr><th>Field</th><th>Filled</th><th>Missing</th><th>Percentage</th></tr>
+  {% for row in field_summary %}
+  <tr>
+    <td>{{ row.field }}</td>
+    <td>{{ row.filled }}</td>
+    <td>{{ row.missing }}</td>
+    <td>{{ row.percentage }}%</td>
+  </tr>
+  {% endfor %}
+</table>
+
+<h2>Repair history</h2>
+{% if summary.repair_history %}
+<ul>
+  {% for entry in summary.repair_history %}
+  <li>{{ entry.created_at }} :: repaired {{ entry.report.cars_repaired }} cars</li>
+  {% endfor %}
+</ul>
+{% else %}
+<p>No repair runs recorded yet.</p>
+{% endif %}
+
+<h2>Integrity checks</h2>
+<p>Expected missing: {{ integrity.summary.expected_missing }}</p>
+<p>Unexpected missing: {{ integrity.summary.unexpected_missing }}</p>
+{% if integrity.issues %}
+<ul>
+  {% for issue in integrity.issues[:10] %}
+  <li>{{ issue.car_id }} :: {{ issue.field }} :: {{ issue.classification }}</li>
+  {% endfor %}
+</ul>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,15 @@
+-------------------------------------------------
+Enterprise Data Repair Report
+-------------------------------------------------
+Cars checked: 187
+Cars repaired: 26
+
+Fields repaired:
+  - price: 12
+  - description: 8
+  - drive: 4
+  - gearbox: 6
+  - upholstery: 11
+  - options_found: 17
+No repairs needed: 161
+Skipped because source unavailable: 9

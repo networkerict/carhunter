@@ -62,6 +62,7 @@ class Car:
             roof_color_index = 37
             sold_index = 38
             sold_at_index = 39
+            last_modified_index = 40 if len(row) > 40 else None
         else:
             color_index = 26
             color_detail_index = 27
@@ -79,6 +80,7 @@ class Car:
             roof_color_index = 39
             sold_index = 24
             sold_at_index = 25
+            last_modified_index = 40 if len(row) > 40 else None
 
         self.sold = row[sold_index] if len(row) > sold_index else 0
         self.sold_at = row[sold_at_index] if len(row) > sold_at_index else None
@@ -95,6 +97,7 @@ class Car:
         self.hp = row[hp_index] if len(row) > hp_index else ""
         self.drive = row[drive_index] if len(row) > drive_index else ""
         self.options_checked_at = row[options_checked_at_index] if len(row) > options_checked_at_index else None
+        self.last_modified = row[last_modified_index] if last_modified_index is not None and len(row) > last_modified_index else None
 
         self.personal_score = row[personal_score_index] if len(row) > personal_score_index else 0
         self.watchlist_match = row[watchlist_match_index] if len(row) > watchlist_match_index else 0

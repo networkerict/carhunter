@@ -43,6 +43,32 @@ def safe_text(value):
     return str(value)
 
 
+def normalize_url(url):
+    if not url:
+        return ""
+
+    normalized = str(url).strip()
+    if not normalized:
+        return ""
+
+    if normalized.startswith("https://www.autoscout24.dehttps://"):
+        return normalized.replace("https://www.autoscout24.dehttps://", "https://", 1)
+    if normalized.startswith("www.autoscout24.dehttps://"):
+        return normalized.replace("www.autoscout24.dehttps://", "https://", 1)
+    if normalized.startswith("https://www.autoscout24.de"):
+        return normalized
+    if normalized.startswith("www.autoscout24.de"):
+        return f"https://{normalized}"
+    if normalized.startswith("autoscout24.de"):
+        return f"https://www.{normalized}"
+    if normalized.startswith("//"):
+        return f"https:{normalized}"
+    if normalized.startswith("http://") and "autoscout24.de" in normalized:
+        return normalized.replace("http://", "https://", 1)
+
+    return normalized
+
+
 def http_get(url):
 
     headers = {
@@ -50,13 +76,21 @@ def http_get(url):
         "Mozilla/5.0"
     }
 
-    r = requests.get(
-        url,
-        headers=headers,
-        timeout=30
-    )
+    normalized_url = normalize_url(url)
+    if not normalized_url:
+        return ""
 
-    return r.text
+    try:
+        r = requests.get(
+            normalized_url,
+            headers=headers,
+            timeout=30
+        )
+        r.raise_for_status()
+        return r.text
+    except requests.RequestException as exc:
+        debug.warning(f"HTTP fetch failed for {normalized_url}: {exc}")
+        return ""
 
 
 
@@ -626,14 +660,15 @@ def extract_color_fallback(car):
 
 def normalize_car(car):
 
-    v = car["vehicle"]
+    v = car.get("vehicle", {})
+    detail = car.get("detail") or {}
 
     options = []
 
     equipment = {}
 
-    if car.get("detail"):
-        equipment = car["detail"].get(
+    if detail:
+        equipment = detail.get(
             "options",
             []
         )
@@ -660,14 +695,15 @@ def normalize_car(car):
                 if x
             ),
 
-        "price":
-            car.get(
-                "price",
-                {}
-            )
-            .get(
-                "priceRaw"
-            ),
+        "price": (
+            car.get("price", {})
+            .get("priceRaw")
+            or car.get("price", {})
+            .get("value", {})
+            .get("raw")
+            or car.get("price", {})
+            .get("raw")
+        ),
 
         "km":
             parse_km(
@@ -704,56 +740,52 @@ def normalize_car(car):
             ),
 
         "upholstery":
-            car.get(
-                "detail",
-                {}
-            ).get(
+            detail.get(
+                "upholstery"
+            ) or v.get(
                 "upholstery",
                 ""
             ),
 
         "interior_color":
-            car.get(
-                "detail",
-                {}
-            ).get(
-                "interior_color",
+            detail.get(
+                "interior_color"
+            ) or v.get(
+                "upholsteryColor",
                 ""
             ),
 
         "gearbox":
-            car.get(
-                "detail",
-                {}
-            ).get(
-                "gearbox",
+            detail.get(
+                "gearbox"
+            ) or v.get(
+                "transmissionType",
                 ""
             ),
 
         "body_type":
-            car.get(
-                "detail",
-                {}
-            ).get(
-                "body_type",
+            detail.get(
+                "body_type"
+            ) or v.get(
+                "bodyType",
                 ""
             ),
 
         "hp":
-            car.get(
-                "detail",
-                {}
-            ).get(
-                "hp",
+            detail.get(
+                "hp"
+            ) or v.get(
+                "rawPowerInHp"
+            ) or v.get(
+                "powerInHp",
                 ""
             ),
 
         "drive":
-            car.get(
-                "detail",
-                {}
-            ).get(
-                "drive",
+            detail.get(
+                "drive"
+            ) or v.get(
+                "driveTrain",
                 ""
             ),
 

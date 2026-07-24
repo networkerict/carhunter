@@ -33,6 +33,13 @@ def get_connection():
     return connection
 
 
+def commit(conn=None):
+    if conn is None:
+        conn = get_connection()
+    conn.commit()
+    return conn
+
+
 def test_connection():
 
     connection = get_connection()
@@ -286,16 +293,40 @@ def save_car(car):
         last_price = existing[1] if existing else None
         alert = 0
 
+        incoming_price = car.get("price")
+        normalized_price = None
+
+        if isinstance(incoming_price, (int, float)) and incoming_price is not None:
+            normalized_price = int(incoming_price)
+        elif isinstance(incoming_price, str):
+            stripped = incoming_price.strip()
+            if stripped:
+                try:
+                    normalized_price = int(float(stripped))
+                except ValueError:
+                    normalized_price = None
+
         if existing:
-
             old_price = existing[1]
-            new_price = car.get("price")
 
-            if old_price and new_price and new_price < old_price:
-
+            if old_price is not None and normalized_price is not None and normalized_price < old_price:
                 last_price = old_price
-                price_drop = old_price - new_price
+                price_drop = old_price - normalized_price
                 alert = 1
+            elif old_price is not None and normalized_price is None:
+                normalized_price = old_price
+                last_price = old_price
+            elif old_price is not None and normalized_price is not None and normalized_price >= old_price:
+                normalized_price = normalized_price
+                last_price = old_price
+                price_drop = 0
+                alert = 0
+            elif old_price is None and normalized_price is None:
+                normalized_price = None
+                last_price = None
+
+        if existing and normalized_price is None and existing[1] is not None:
+            normalized_price = existing[1]
 
         from datetime import datetime
 
@@ -324,6 +355,8 @@ def save_car(car):
                     body_type = ?,
                     hp = ?,
                     drive = ?,
+                    description = ?,
+                    options_found = ?,
                     last_price = ?,
                     price_drop = ?,
                     alert = ?
@@ -333,7 +366,7 @@ def save_car(car):
                     autoscout_id,
                     fingerprint,
                     car.get("title"),
-                    car.get("price"),
+                    normalized_price,
                     car.get("km"),
                     car.get("year"),
                     car.get("url"),
@@ -346,6 +379,8 @@ def save_car(car):
                     car.get("body_type",""),
                     car.get("hp",0),
                     car.get("drive",""),
+                    car.get("description", ""),
+                    car.get("options_found", ""),
                     last_price,
                     price_drop,
                     alert,
@@ -374,19 +409,21 @@ def save_car(car):
                     body_type,
                     hp,
                     drive,
+                    description,
+                    options_found,
                     last_price,
                     price_drop,
                     alert
                 )
 
                 VALUES
-                (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     autoscout_id,
                     fingerprint,
                     car.get("title"),
-                    car.get("price"),
+                    normalized_price,
                     car.get("km"),
                     car.get("year"),
                     car.get("url"),
@@ -400,6 +437,8 @@ def save_car(car):
                     car.get("body_type",""),
                     car.get("hp",0),
                     car.get("drive",""),
+                    car.get("description", ""),
+                    car.get("options_found", ""),
                     last_price,
                     price_drop,
                     alert
@@ -425,7 +464,12 @@ def update_car_details(
     car_id,
     color="",
     color_detail="",
-    interior_color=""
+    interior_color="",
+    upholstery="",
+    gearbox="",
+    body_type="",
+    hp=0,
+    drive=""
 ):
 
     conn = get_connection()
@@ -436,13 +480,23 @@ def update_car_details(
         SET
             color = ?,
             color_detail = ?,
-            interior_color = ?
+            interior_color = ?,
+            upholstery = ?,
+            gearbox = ?,
+            body_type = ?,
+            hp = ?,
+            drive = ?
         WHERE id = ?
         """,
         (
             color,
             color_detail,
             interior_color,
+            upholstery,
+            gearbox,
+            body_type,
+            hp,
+            drive,
             car_id
         )
     )
@@ -470,11 +524,6 @@ def update_car_year(car_id, year):
 
     connection.commit()
     connection.close()
-
-    conn.commit()
-    conn.close()
-
-    return is_new
 
 
 def ensure_column(conn, table, column, definition):
@@ -539,7 +588,8 @@ def init_database(conn):
         watchlist_match INTEGER DEFAULT 0,
         telegram_sent INTEGER DEFAULT 0,
         telegram_sent_at TEXT DEFAULT '',
-        roof_color TEXT DEFAULT ''
+        roof_color TEXT DEFAULT '',
+        last_modified TEXT DEFAULT ''
     )
     """)
 
@@ -561,6 +611,7 @@ def init_database(conn):
         ("premium_score", "INTEGER DEFAULT 0"),
         ("sold", "INTEGER DEFAULT 0"),
         ("sold_at", "TEXT DEFAULT ''"),
+        ("last_modified", "TEXT DEFAULT ''"),
     ]
 
     for column, definition in car_columns:

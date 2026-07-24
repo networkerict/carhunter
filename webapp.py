@@ -1,8 +1,23 @@
 from flask import Flask, render_template, redirect
 import database
 import debug
+import data_quality
 
 app = Flask(__name__)
+app.jinja_env.globals['format_currency'] = lambda value: format_currency(value)
+
+
+def format_currency(value):
+    if value is None:
+        return "—"
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return "—"
+    try:
+        return f"€{int(value):,}".replace(",", ".")
+    except (TypeError, ValueError):
+        return "—"
 
 
 @app.route("/")
@@ -210,6 +225,20 @@ def dashboard():
     return render_template(
         "dashboard.html",
         data=data
+    )
+
+
+@app.route("/data-quality")
+def data_quality_dashboard():
+
+    summary = data_quality.get_dashboard_summary()
+    integrity = data_quality.run_integrity_checks()
+
+    return render_template(
+        "data_quality_dashboard.html",
+        summary=summary,
+        field_summary=summary["field_summary"],
+        integrity=integrity,
     )
 
 

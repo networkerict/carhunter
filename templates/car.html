@@ -50,7 +50,7 @@ Premium:
 <h2>Auto</h2>
 
 Prijs:
-€{{ car.price }}
+{{ format_currency(car.price) }}
 
 <br>
 
@@ -66,6 +66,9 @@ KM:
 </div>
 
 
+{% set has_specifications = car.body_type or car.hp or car.drive or car.gearbox %}
+
+{% if has_specifications %}
 <div class="car-box">
 
 <h2>Specificaties</h2>
@@ -102,6 +105,7 @@ Versnellingsbak:
 {% endif %}
 
 </div>
+{% endif %}
 
 
 <div class="car-box">

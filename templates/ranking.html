@@ -76,7 +76,7 @@ value="{{ car.id }}">
 
 <p>
 
-💰 <b>€{{ car.price }}</b>
+💰 <b>{{ format_currency(car.price) }}</b>
 <br>
 
 📅 {{ car.year }}

@@ -125,40 +125,41 @@ def analyze_comparison(cars):
         )
 
 
-    cheapest = min(
-        cars,
-        key=lambda c: c.price
-    )
+    priced_cars = [
+        car for car in cars
+        if getattr(car, "price", None) is not None
+        and getattr(car, "price", None) != ""
+    ]
 
-
-    if cheapest != winner:
-
-        difference = (
-            winner.price
-            -
-            cheapest.price
+    if priced_cars:
+        cheapest = min(
+            priced_cars,
+            key=lambda c: c.price
         )
 
-        warnings.append(
-            f"€{difference} duurder dan goedkoopste alternatief"
+        if cheapest != winner:
+            difference = (
+                winner.price
+                -
+                cheapest.price
+            )
+
+            warnings.append(
+                f"€{difference} duurder dan goedkoopste alternatief"
+            )
+
+    for car in priced_cars:
+        ratio = round(
+            car.final_score / (car.price / 1000),
+            2
         )
 
-
-    for car in cars:
-
-        if car.price:
-
-            ratio = round(
-                car.final_score / (car.price / 1000),
-                2
-            )
-
-            value.append(
-                {
-                    "title": car.title,
-                    "ratio": ratio
-                }
-            )
+        value.append(
+            {
+                "title": car.title,
+                "ratio": ratio
+            }
+        )
 
 
     value = sorted(

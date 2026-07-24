@@ -25,6 +25,7 @@ import pipeline
 import pipeline_stats
 import pipeline_report
 import deals
+import repair_engine
 import watchlist_report
 
 version=f"{config.APP_NAME} {config.VERSION}"
@@ -83,7 +84,12 @@ def recheck_database():
                 car.id,
                 details.get("color", ""),
                 details.get("color_detail", ""),
-                details.get("interior_color", "")
+                details.get("interior_color", ""),
+                details.get("upholstery", ""),
+                details.get("gearbox", ""),
+                details.get("body_type", ""),
+                details.get("hp", 0),
+                details.get("drive", "")
             )
 
             details_updated += 1
@@ -219,6 +225,18 @@ def parse_arguments():
         "--today",
         action="store_true",
         help="Show new cars today"
+    )
+
+    parser.add_argument(
+        "--repair",
+        action="store_true",
+        help="Repair incomplete cars by re-fetching source data"
+    )
+
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview repairs without writing changes"
     )
 
     parser.add_argument(
@@ -630,6 +648,13 @@ def main():
         import reporting
 
         reporting.show_today()
+
+    elif args.repair:
+
+        debug.info("Repair mode")
+
+        report = repair_engine.run_repair(dry_run=args.dry_run)
+        repair_engine.engine.print_report(report)
 
     elif args.debug_today:
 

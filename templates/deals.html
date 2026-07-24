@@ -45,7 +45,7 @@ AutoHunter Deals
 💰
 
 <strong>
-€{{"{:,}".format(car.price).replace(",",".")}}
+{{ format_currency(car.price) }}
 </strong>
 
 </p>
@@ -61,7 +61,7 @@ AutoHunter Deals
 Prijsdaling:
 
 <strong>
-€{{"{:,}".format(car.price_drop).replace(",",".")}}
+{{ format_currency(car.price_drop) }}
 </strong>
 
 </p>

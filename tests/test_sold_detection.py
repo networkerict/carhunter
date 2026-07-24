@@ -5,6 +5,7 @@ import unittest
 
 import config
 import database
+import scraper
 import telegram
 from models import Car
 
@@ -288,6 +289,38 @@ class SoldDetectionTests(unittest.TestCase):
         self.assertIn("SUCCESS", message)
         self.assertIn("Not available anymore: 2", message)
         self.assertIn("Active cars: 10", message)
+
+    def test_save_car_preserves_specifications_from_vehicle_payload(self):
+        listing_car = {
+            "id": 999,
+            "fingerprint": "spec-fingerprint",
+            "title": "Audi A5",
+            "price": {"priceRaw": 25000},
+            "vehicle": {
+                "make": "Audi",
+                "model": "A5",
+                "motorTypeName": "40 TFSI",
+                "mileageInKm": "39251",
+                "bodyType": "Cabrio",
+                "rawPowerInHp": 204,
+                "driveTrain": "Front",
+                "transmissionType": "Automatik",
+                "upholstery": "Teilleder",
+                "upholsteryColor": "Schwarz",
+            },
+            "tracking": {"firstRegistration": "05/2023"},
+            "url": "/angebote/test"
+        }
+
+        database.save_car(scraper.normalize_car(listing_car))
+
+        stored = database.get_all_cars()[0]
+        self.assertEqual(stored.body_type, "Cabrio")
+        self.assertEqual(stored.hp, 204)
+        self.assertEqual(stored.drive, "Front")
+        self.assertEqual(stored.gearbox, "Automatik")
+        self.assertEqual(stored.upholstery, "Teilleder")
+        self.assertEqual(stored.interior_color, "Schwarz")
 
 
 if __name__ == "__main__":

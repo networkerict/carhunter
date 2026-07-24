@@ -33,7 +33,7 @@ Auto vergelijking
 <br>
 
 <b>Prijs:</b>
-€{{ recommendation.winner.price }}
+{{ format_currency(recommendation.winner.price) }}
 
 <br>
 
@@ -115,7 +115,7 @@ Auto vergelijking
 <br><br>
 
 De winnaar kost
-<b>€{{ recommendation.price_difference }}</b>
+<b>{{ format_currency(recommendation.price_difference) }}</b>
 meer,
 
 maar levert
@@ -164,7 +164,7 @@ De meerprijs komt vooral door:
 <br>
 
 <b>Prijs:</b>
-€{{ recommendation.value_choice.price }}
+{{ format_currency(recommendation.value_choice.price) }}
 
 <br>
 
@@ -194,7 +194,7 @@ De meerprijs komt vooral door:
 <br>
 
 Prijs:
-€{{ recommendation.value_choice.price }}
+{{ format_currency(recommendation.value_choice.price) }}
 
 <br>
 
@@ -218,7 +218,7 @@ KM:
 <br>
 
 💰 Verschil:
-€{{ recommendation.price_difference }}
+{{ format_currency(recommendation.price_difference) }}
 
 <br>
 
@@ -260,7 +260,7 @@ ID: {{ car.id }}
 
 <br>
 
-€{{ car.price }}
+{{ format_currency(car.price) }}
 
 <br>
 
@@ -281,7 +281,7 @@ ID: {{ car.id }}
 <td>Prijs</td>
 
 {% for car in cars %}
-<td>€{{ car.price }}</td>
+<td>{{ format_currency(car.price) }}</td>
 {% endfor %}
 
 </tr>
