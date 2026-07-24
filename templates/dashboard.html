@@ -15,8 +15,18 @@ AutoHunter Dashboard
 <h2>📊 Statistieken</h2>
 
 <p>
+Actieve auto's:
+{{ data["inventory"]["active"] }}
+</p>
+
+<p>
 Nieuwe auto's vandaag:
-{{ data["today"]|length }}
+{{ data["inventory"]["new"] }}
+</p>
+
+<p>
+Sold auto's:
+{{ data["inventory"]["sold"] }}
 </p>
 
 <p>

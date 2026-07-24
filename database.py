@@ -841,6 +841,29 @@ def search_cars(
     ]
 
 
+def get_inventory_counts():
+
+    conn = get_connection()
+
+    row = conn.execute(
+        """
+        SELECT
+            SUM(COALESCE(sold, 0) = 0) AS active,
+            SUM(COALESCE(sold, 0) = 0 AND DATE(first_seen) = DATE('now')) AS new,
+            SUM(COALESCE(sold, 0) = 1) AS sold
+        FROM cars
+        """
+    ).fetchone()
+
+    conn.close()
+
+    return {
+        "active": int(row[0] or 0),
+        "new": int(row[1] or 0),
+        "sold": int(row[2] or 0),
+    }
+
+
 def get_option_counts(limit=25):
 
     conn = get_connection()
