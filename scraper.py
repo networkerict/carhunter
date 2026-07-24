@@ -816,7 +816,14 @@ def run_scraper():
 
     new_cars = 0
 
+    active_fingerprints = []
+
     for car in cars.values():
+
+        fingerprint = car.get("fingerprint")
+
+        if fingerprint:
+            active_fingerprints.append(fingerprint)
 
         url = (
             "https://www.autoscout24.de"
@@ -851,5 +858,7 @@ def run_scraper():
 
         if result:
             new_cars += 1
+
+    database.mark_missing_cars_sold(active_fingerprints)
 
     return new_cars

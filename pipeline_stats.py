@@ -111,6 +111,7 @@ def get_recent_runs(limit=10):
 def get_pipeline_stats():
 
     cars = database.get_all_cars()
+    inventory = database.get_inventory_counts()
 
     high_score = 0
     price_drops = 0
@@ -125,6 +126,9 @@ def get_pipeline_stats():
 
     return {
         "high_score_cars": high_score,
-        "price_drops": price_drops
+        "price_drops": price_drops,
+        "active_cars": inventory["active"],
+        "new_cars": inventory["new"],
+        "sold_cars": inventory["sold"],
     }
 
