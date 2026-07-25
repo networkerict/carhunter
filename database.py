@@ -957,7 +957,7 @@ def get_inventory_counts():
     }
 
 
-def get_option_counts(limit=25):
+def get_option_counts(limit=None):
 
     conn = get_connection()
 
@@ -994,13 +994,18 @@ def get_option_counts(limit=25):
 
             counts[option] = counts.get(option,0) + 1
 
-    return sorted(
+    sorted_counts = sorted(
         counts.items(),
         key=lambda x: x[0].lower()
-    )[:limit]
+    )
+
+    if limit is None:
+        return sorted_counts
+
+    return sorted_counts[:limit]
 
 
-def get_color_detail_counts(limit=25):
+def get_color_detail_counts(limit=None):
 
     conn = get_connection()
 
@@ -1023,10 +1028,15 @@ def get_color_detail_counts(limit=25):
 
         counts[color] = counts.get(color,0) + 1
 
-    return sorted(
+    sorted_counts = sorted(
         counts.items(),
         key=lambda x: x[0].lower()
-    )[:limit]
+    )
+
+    if limit is None:
+        return sorted_counts
+
+    return sorted_counts[:limit]
 
 def get_all_cars(conn=None):
 

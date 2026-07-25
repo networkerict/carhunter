@@ -11,16 +11,18 @@ margin:30px;
 
 display:flex;
 gap:25px;
+align-items:flex-start;
 
 }
 
 
 .sidebar {
 
-width:250px;
+width:350px;
 background:white;
-padding:20px;
+padding:20px 22px;
 border-radius:10px;
+border-right:1px solid #e6e6e6;
 
 }
 
@@ -28,6 +30,7 @@ border-radius:10px;
 .content {
 
 flex:1;
+min-width:0;
 background:white;
 padding:20px;
 border-radius:10px;
@@ -48,9 +51,19 @@ margin-bottom:15px;
 input[type="checkbox"] {
 
 width:auto;
-margin-right:8px;
 margin-bottom:0;
 
+}
+
+.sidebar form > label {
+    display: block;
+    margin-bottom: 6px;
+    font-weight: 600;
+}
+
+.sidebar h3 {
+    margin: 26px 0 12px;
+    font-weight: 700;
 }
 
 button {
@@ -119,12 +132,68 @@ margin-bottom:8px;
     display: block;
 }
 
+.base-color-list,
+.specific-color-list {
+    display: flex;
+    flex-direction: column;
+}
+
 
 .color-list label,
 .color-detail-list label,
 .option-list label {
-    display: block;
-    margin-bottom: 8px;
+    margin-bottom: 6px;
+}
+
+.filter-checkbox {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 6px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+.filter-checkbox:hover {
+    background: #f7f7f7;
+}
+
+.filter-checkbox input[type="checkbox"] {
+    margin: 2px 0 0;
+    flex: 0 0 auto;
+}
+
+.filter-checkbox > span {
+    flex: 1;
+    line-height: 1.35;
+}
+
+.filter-count {
+    color: #6f6f6f;
+    font-weight: 400;
+}
+
+.scroll-list {
+    overflow-y: auto;
+}
+
+.color-detail-scroll {
+    max-height: 235px;
+}
+
+.option-scroll {
+    max-height: 250px;
+}
+
+@media (max-width: 1100px) {
+    .layout {
+        flex-direction: column;
+    }
+
+    .sidebar {
+        width: 100%;
+        border-right: 0;
+    }
 }
 
 .ranking-button {

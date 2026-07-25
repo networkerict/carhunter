@@ -64,83 +64,41 @@ AutoHunter Zoeken
 
 <h3>Kleur</h3>
 
-<div class="color-list">
+<div class="color-list base-color-list">
 
 {% set selected_colors = filters.getlist('color') %}
+{% set base_colors = [
+    ("blauw", "Blauw"),
+    ("bruin", "Bruin"),
+    ("grijs", "Grijs"),
+    ("groen", "Groen"),
+    ("rood", "Rood"),
+    ("wit", "Wit"),
+    ("zilver", "Zilver"),
+    ("zwart", "Zwart")
+] %}
 
-<label>
+{% for color_value, color_label in base_colors %}
+
+<label class="filter-checkbox">
 <input type="checkbox"
        name="color"
-       value="zwart"
-       {% if "zwart" in selected_colors %}checked{% endif %}>
-Zwart
+       value="{{ color_value }}"
+       {% if color_value in selected_colors %}checked{% endif %}>
+<span>{{ color_label }}</span>
 </label>
 
-<label>
-<input type="checkbox"
-       name="color"
-       value="grijs"
-       {% if "grijs" in selected_colors %}checked{% endif %}>
-Grijs
-</label>
-
-<label>
-<input type="checkbox"
-       name="color"
-       value="blauw"
-       {% if "blauw" in selected_colors %}checked{% endif %}>
-Blauw
-</label>
-
-<label>
-<input type="checkbox"
-       name="color"
-       value="groen"
-       {% if "groen" in selected_colors %}checked{% endif %}>
-Groen
-</label>
-
-<label>
-<input type="checkbox"
-       name="color"
-       value="wit"
-       {% if "wit" in selected_colors %}checked{% endif %}>
-Wit
-</label>
-
-<label>
-<input type="checkbox"
-       name="color"
-       value="rood"
-       {% if "rood" in selected_colors %}checked{% endif %}>
-Rood
-</label>
-
-<label>
-<input type="checkbox"
-       name="color"
-       value="bruin"
-       {% if "bruin" in selected_colors %}checked{% endif %}>
-Bruin
-</label>
-
-<label>
-<input type="checkbox"
-       name="color"
-       value="zilver"
-       {% if "zilver" in selected_colors %}checked{% endif %}>
-Zilver
-</label>
+{% endfor %}
 
 </div>
 
 <h3>Specifieke kleur</h3>
 
-<div class="color-list">
+<div class="color-list scroll-list color-detail-scroll specific-color-list">
 
-{% for color,count in color_details %}
+{% for color,count in color_details|sort %}
 
-<label>
+<label class="filter-checkbox">
 
 <input
 type="checkbox"
@@ -149,7 +107,7 @@ value="{{color}}"
 {% if color in filters.getlist('color_detail') %}checked{% endif %}
 >
 
-{{color}} ({{count}})
+<span>{{color}} <span class="filter-count">({{count}})</span></span>
 
 </label>
 
@@ -160,13 +118,11 @@ value="{{color}}"
 
 <h3>Populaire opties</h3>
 
+<div class="option-list scroll-list option-scroll">
 
-{% for option,count in options %}
+{% for option,count in options|sort %}
 
-
-<div class="checkbox-row">
-
-
+<label class="filter-checkbox">
 <input
 type="checkbox"
 name="option"
@@ -176,16 +132,13 @@ checked
 {% endif %}
 >
 
-
-<label>
-{{option}} ({{count}})
+<span>{{option}} <span class="filter-count">({{count}})</span></span>
 </label>
 
 
-</div>
-
-
 {% endfor %}
+
+</div>
 
 
 
