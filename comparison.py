@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 """
-AutoHunter v2.9-dev
+AutoHunter v2.9
 Vehicle comparison helpers
 """
 

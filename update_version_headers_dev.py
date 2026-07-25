@@ -30,14 +30,14 @@ for filename in files:
 
     text = re.sub(
         r"AutoHunter v[0-9]+\.[0-9]+(?:\.[0-9]+)?(?:-dev)?",
-        "AutoHunter v2.9-dev",
+        "AutoHunter v3.0-dev",
         text
     )
 
     if filename == "config.py":
         text = text.replace(
-            'VERSION = "2.8"',
-            'VERSION = "2.9-dev"'
+            'VERSION = "2.9"',
+            'VERSION = "3.0-dev"'
         )
 
     if text != old:
@@ -46,4 +46,4 @@ for filename in files:
     else:
         print("Geen wijziging:", filename)
 
-print("v2.9-dev versie headers bijgewerkt")
+print("v2.9 versie headers bijgewerkt")

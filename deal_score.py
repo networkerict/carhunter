@@ -1,5 +1,5 @@
 """
-AutoHunter v2.9-dev
+AutoHunter v2.9
 Deal scoring engine
 """
 

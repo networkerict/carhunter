@@ -1,3 +1,11 @@
+# Legacy Document
+
+This document is preserved for historical reference.
+Canonical, actively maintained documentation now lives in the new docs structure.
+Start at [docs/README.md](README.md) for current operational and architecture guidance.
+
+---
+
 # AutoHunter Architecture
 
 ## Version

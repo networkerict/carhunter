@@ -1,6 +1,6 @@
 -- ============================================================
 -- CarHunter Enterprise Database Health Check
--- Version : 2.9-dev
+-- Version : 2.9
 -- Purpose : Validate database integrity after pipeline changes
 -- ============================================================
 

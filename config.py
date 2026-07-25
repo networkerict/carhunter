@@ -1,12 +1,12 @@
 """
-AutoHunter v2.9-dev
+AutoHunter v2.9
 Configuration
 """
 
 
 APP_NAME = "AutoHunter"
 
-VERSION = "2.9-dev"
+VERSION = "2.9"
 
 
 # Vehicle search
