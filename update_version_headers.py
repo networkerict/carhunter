@@ -30,7 +30,7 @@ for filename in files:
 
     text = re.sub(
         r"AutoHunter v[0-9]+\.[0-9]+(?:\.[0-9]+)?(?:-dev)?",
-        "AutoHunter v2.8-dev",
+        "AutoHunter v3.0-dev",
         text
     )
 

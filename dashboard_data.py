@@ -1,5 +1,5 @@
 """
-AutoHunter v2.9-dev
+AutoHunter v3.0-dev
 Dashboard data layer
 """
 

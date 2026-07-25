@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 """
-AutoHunter v2.9-dev
+AutoHunter v3.0-dev
 Option analysis engine
 """
 
