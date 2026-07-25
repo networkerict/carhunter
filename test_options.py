@@ -1,3 +1,5 @@
-import options
+import orchestration
 
-options.update_all_options()
+orchestration.run_pipeline(
+	"options"
+)

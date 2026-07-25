@@ -317,7 +317,7 @@ def analyze_options(car, explain=False):
     return found, score
 
 
-def update_all_options():
+def update_all_options(force=False):
 
     debug.info(
         "Starting option update"
@@ -334,7 +334,7 @@ def update_all_options():
 
     for car in cars:
 
-        if car.options_checked:
+        if car.options_checked and not force:
             continue
 
         result = update_car_options(car)

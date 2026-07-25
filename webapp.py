@@ -2,6 +2,7 @@ from flask import Flask, render_template, redirect
 import database
 import debug
 import data_quality
+import orchestration
 
 app = Flask(__name__)
 app.jinja_env.globals['format_currency'] = lambda value: format_currency(value)
@@ -274,13 +275,13 @@ def deals():
 @app.route("/rescore")
 def rescore():
 
-    import scoring
-
     debug.info(
         "Web rescore gestart"
     )
 
-    scoring.recalculate_scores()
+    orchestration.run_pipeline(
+        "rescore"
+    )
 
     debug.info(
         "Web rescore afgerond"

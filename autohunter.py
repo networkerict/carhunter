@@ -17,14 +17,7 @@ import database
 import debug_car
 import debug_score
 import debug_options
-import options
-import descriptions
-import scoring
-import scraper
-import pipeline
-import pipeline_stats
-import pipeline_report
-import deals
+import orchestration
 import repair_engine
 import watchlist_report
 
@@ -32,11 +25,15 @@ version=f"{config.APP_NAME} {config.VERSION}"
 
 def recheck_database():
 
-    debug.info(
-        "Database health check"
+    context = orchestration.run_pipeline(
+        "recheck"
     )
 
-    health = database.database_health()
+    report = context.stage_results[
+        "recheck_report"
+    ]
+
+    health = report["health"]
 
     print()
     print("AutoHunter Database Check")
@@ -54,85 +51,12 @@ def recheck_database():
         f"Options checked:        {health['options_checked']}"
     )
     print()
-
-
-    debug.info(
-        "Recalculating vehicle options"
-    )
-
-    import options
-
-    cars = database.get_all_cars()
-
-    updated = 0
-    details_updated = 0
-
-    for car in cars:
-
-        if not car.url:
-            continue
-
-
-        details = scraper.fetch_car_details(
-            car.url
-        )
-
-
-        if details:
-
-            database.update_car_details(
-                car.id,
-                details.get("color", ""),
-                details.get("color_detail", ""),
-                details.get("interior_color", ""),
-                details.get("upholstery", ""),
-                details.get("gearbox", ""),
-                details.get("body_type", ""),
-                details.get("hp", 0),
-                details.get("drive", "")
-            )
-
-            details_updated += 1
-
-
-            if car.options_score == 0:
-
-                debug.info(
-                    f"Analyzing options: {car.url}"
-                )
-
-
-                found, score = options.analyze_options(
-                    details
-                )
-
-
-                if found:
-
-                    database.update_car_options(
-                        car.id,
-                        ", ".join(found),
-                        score
-                    )
-
-                    updated += 1
-
-
-    debug.info(
-        f"Options updated: {updated}"
-    )
-
-    debug.info(
-        f"Details updated: {details_updated}"
-    )
-
-
     print(
-        f"Options recalculated: {updated}"
+        f"Options recalculated: {report['options_updated']}"
     )
 
     print(
-        f"Vehicle details updated: {details_updated}"
+        f"Vehicle details updated: {report['details_updated']}"
     )
 
 
@@ -262,226 +186,14 @@ def parse_arguments():
 
 
 def run_pipeline():
-
-    debug.info(
-        "Starting AutoHunter pipeline"
+    return orchestration.run_pipeline(
+        "full"
     )
-
-    run_id = pipeline.start_run()
-
-    start_time = datetime.now()
-
-    try:
-
-        debug.info(
-            "Scraping AutoScout24"
-        )
-
-        new_cars, not_available_anymore = scraper.run_scraper()
-
-        debug.info(
-            "Updating descriptions"
-        )
-
-        descriptions_updated = descriptions.update_missing_descriptions()
-
-        debug.info(
-            "Updating options"
-        )
-
-        options_updated = options.update_all_options()
-
-        debug.info(
-            "Recalculating scores"
-        )
-
-        scoring.recalculate_scores()
-
-        debug.info(
-            "Calculating deal scores"
-        )
-
-        deal_scores_updated = deals.update_deal_scores()
-
-        debug.info(
-            f"Deal scores updated: {deal_scores_updated}"
-        )
-
-        debug.info(
-            "Checking deal alerts"
-        )
-
-        try:
-
-            import telegram
-            import database
-
-            #
-            # Deal alerts
-            #
-
-            top_deals = database.get_deals(5)
-
-            for car in top_deals:
-
-                if car.deal_score >= 40:
-
-                    telegram.send_deal_alert(car)
-
-            #
-            # Nieuwe watchlist matches
-            #
-
-            watchlist_cars = database.get_unsent_watchlist_matches()
-
-            debug.info(
-                f"New watchlist matches: {len(watchlist_cars)}"
-            )
-
-            for car in watchlist_cars:
-
-                debug.info(
-                    f"Sending watchlist alert: {car.id} - {car.title}"
-                )
-
-                result = telegram.send_watchlist_alert(car)
-
-                debug.info(
-                    f"Telegram result: {result}"
-                )
-
-                if result:
-
-                    database.mark_watchlist_sent(car.id)
-
-                    debug.info(
-                        f"Marked as sent: {car.id}"
-                    )
-
-        except Exception as e:
-
-            debug.info(
-                f"Deal/watchlist alert failed: {e}"
-            )
-
-        debug.info(
-            "Collecting pipeline statistics"
-        )
-
-        stats = pipeline_stats.get_pipeline_stats()
-
-        run_stats = {
-            "status": "SUCCESS",
-            "duration_seconds": 0,
-            "new_cars": new_cars,
-            "not_available_anymore": not_available_anymore,
-            "price_drops": stats["price_drops"],
-            "high_score_cars": stats["high_score_cars"],
-            "descriptions_updated": descriptions_updated,
-            "options_updated": options_updated,
-            "alerts_sent": 0,
-        }
-
-        try:
-
-            import telegram
-
-            telegram.send_pipeline_summary(
-                run_stats=run_stats,
-                db_stats=stats
-            )
-
-            today_cars = database.get_todays_cars(10)
-
-            interesting_cars = [
-                car
-                for car in today_cars
-                if is_interesting_car(car)
-            ]
-
-            if interesting_cars:
-
-                telegram.send_today_report(
-                    interesting_cars
-                )
-
-        except Exception as e:
-
-            debug.info(
-                f"Telegram notification failed: {e}"
-            )
-
-        debug.info(
-            f"High score cars: {stats['high_score_cars']}"
-        )
-
-        debug.info(
-            f"Price drops: {stats['price_drops']}"
-        )
-
-        debug.info(
-            "Cleaning old pipeline runs"
-        )
-
-        deleted_runs = pipeline.cleanup_runs(
-            90
-        )
-
-        debug.info(
-            f"Deleted old pipeline runs: {deleted_runs}"
-        )
-
-
-        debug.info(
-            "Pipeline completed"
-        )
-
-
-        duration = int(
-            (datetime.now() - start_time).total_seconds()
-        )
-
-
-        pipeline.finish_run(
-            run_id,
-            status="SUCCESS",
-            new_cars=new_cars,
-            not_available_anymore=not_available_anymore,
-            descriptions_updated=descriptions_updated,
-            options_updated=options_updated,
-            deal_scores_updated=deal_scores_updated,
-            high_score_cars=stats["high_score_cars"],
-            price_drops=stats["price_drops"],
-            duration_seconds=duration
-        )
-
-        pipeline_report.print_summary(
-            run_id
-        )
-
-    except Exception as e:
-
-        pipeline.finish_run(
-            run_id,
-            status="FAILED",
-            error_message=str(e)
-        )
-
-        debug.info(
-            f"Pipeline failed: {e}"
-        )
-
-        raise
 
 
 def is_interesting_car(car):
-
-    if car.watchlist_match != 1:
-        return False
-
-    return (
-        car.personal_score >= 70
-        or car.deal_score >= 40
+    return orchestration.is_interesting_car(
+        car
     )
 
 
@@ -580,8 +292,9 @@ def main():
             "Option update mode"
         )
 
-        import options
-        options.update_all_options()
+        orchestration.run_pipeline(
+            "options"
+        )
 
     elif args.descriptions:
 
@@ -589,14 +302,18 @@ def main():
             "Description update mode"
         )
 
-        descriptions.update_missing_descriptions()
+        orchestration.run_pipeline(
+            "descriptions"
+        )
 
     elif args.rescore:
         debug.info(
             "Rescore mode"
         )
 
-        scoring.recalculate_scores()
+        orchestration.run_pipeline(
+            "rescore"
+        )
 
     elif args.recheck:
         recheck_database()
@@ -653,7 +370,13 @@ def main():
 
         debug.info("Repair mode")
 
-        report = repair_engine.run_repair(dry_run=args.dry_run)
+        context = orchestration.run_pipeline(
+            "repair",
+            dry_run=args.dry_run,
+        )
+        report = context.stage_results[
+            "repair_report"
+        ]
         repair_engine.engine.print_report(report)
 
     elif args.debug_today:

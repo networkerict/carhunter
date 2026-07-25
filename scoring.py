@@ -261,6 +261,14 @@ def recalculate_scores():
         conn.close()
 
 
+def recalculate_all_scores():
+    import orchestration
+
+    orchestration.run_pipeline(
+        "rescore"
+    )
+
+
 def calculate_final_score(car):
 
     car_score = calculate_car_score(car)
