@@ -45,14 +45,17 @@ class OrchestrationTests(unittest.TestCase):
 
     def test_full_mode_uses_canonical_stage_order_and_tracking(self):
         calls = []
+        ingestion_result = mock.Mock(new_cars=2, not_available_anymore=1)
 
         with mock.patch(
             "pipeline.start_run",
             side_effect=lambda: calls.append("start_run") or 42,
         ), mock.patch(
-            "scraper.run_scraper",
-            side_effect=lambda: calls.append("scrape") or (2, 1),
+            "sources.build_default_source_registry",
+            return_value=mock.sentinel.registry,
         ), mock.patch(
+            "sources.SourceIngestionService",
+        ) as source_ingestion_service, mock.patch(
             "descriptions.update_missing_descriptions",
             side_effect=lambda: calls.append("descriptions") or 3,
         ), mock.patch(
@@ -96,6 +99,9 @@ class OrchestrationTests(unittest.TestCase):
             "pipeline_report.print_summary",
             side_effect=lambda run_id: calls.append(("print_summary", run_id)),
         ):
+            source_ingestion_service.return_value.ingest_full_inventory.side_effect = (
+                lambda **kwargs: calls.append("scrape") or ingestion_result
+            )
             context = orchestration.run_pipeline(
                 "full"
             )
