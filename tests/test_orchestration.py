@@ -45,13 +45,27 @@ class OrchestrationTests(unittest.TestCase):
 
     def test_full_mode_uses_canonical_stage_order_and_tracking(self):
         calls = []
+        ingestion_result = mock.Mock(
+            snapshots=[mock.sentinel.snapshot],
+            active_fingerprints=["fp-1"],
+        )
+        compatibility_result = mock.Mock(new_cars=2, not_available_anymore=1)
+        should_fetch_detail = mock.Mock()
 
         with mock.patch(
             "pipeline.start_run",
             side_effect=lambda: calls.append("start_run") or 42,
         ), mock.patch(
-            "scraper.run_scraper",
-            side_effect=lambda: calls.append("scrape") or (2, 1),
+            "sources.build_default_source_registry",
+            return_value=mock.sentinel.registry,
+        ), mock.patch(
+            "sources.SourceIngestionService",
+        ) as source_ingestion_service, mock.patch(
+            "source_compatibility.apply_compatibility_inventory_updates",
+            side_effect=lambda snapshots, active_fingerprints, dry_run=False: calls.append("persist") or compatibility_result,
+        ), mock.patch(
+            "source_compatibility.should_fetch_detail_for_listing",
+            should_fetch_detail,
         ), mock.patch(
             "descriptions.update_missing_descriptions",
             side_effect=lambda: calls.append("descriptions") or 3,
@@ -96,6 +110,9 @@ class OrchestrationTests(unittest.TestCase):
             "pipeline_report.print_summary",
             side_effect=lambda run_id: calls.append(("print_summary", run_id)),
         ):
+            source_ingestion_service.return_value.ingest_full_inventory.side_effect = (
+                lambda **kwargs: calls.append("scrape") or ingestion_result
+            )
             context = orchestration.run_pipeline(
                 "full"
             )
@@ -105,6 +122,7 @@ class OrchestrationTests(unittest.TestCase):
             [
                 "start_run",
                 "scrape",
+                "persist",
                 "descriptions",
                 ("options", False),
                 "scores",
@@ -123,6 +141,10 @@ class OrchestrationTests(unittest.TestCase):
         self.assertEqual(context.stage_results["new_cars"], 2)
         self.assertEqual(context.stage_results["deal_scores_updated"], 5)
         self.assertEqual(context.stage_results["high_score_cars"], 6)
+        source_ingestion_service.return_value.ingest_full_inventory.assert_called_once_with(
+            source_name="autoscout24",
+            should_fetch_detail=should_fetch_detail,
+        )
 
     def test_cli_processing_modes_delegate_to_canonical_pipeline(self):
         cases = [

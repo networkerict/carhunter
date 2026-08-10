@@ -21,6 +21,14 @@ MODEL = "A5 Cabrio"
 DATABASE = "carhunter.db"
 
 
+SOURCE_REGISTRY = {
+    "autoscout24": {
+        "enabled": True,
+        "max_pages": 100,
+    }
+}
+
+
 # Logging
 
 DEBUG_LEVEL = "INFO"

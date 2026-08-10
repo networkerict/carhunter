@@ -222,17 +222,33 @@ def _finish_pipeline_run(
     "Scrape AutoScout24 and update the inventory.",
 )
 def stage_scrape(context):
-
-    import scraper
-
-    debug.info(
-        "Scraping AutoScout24"
+    from sources import SourceIngestionService, build_default_source_registry
+    from source_compatibility import (
+        apply_compatibility_inventory_updates,
+        should_fetch_detail_for_listing,
     )
 
-    new_cars, not_available_anymore = scraper.run_scraper()
+    debug.info(
+        "Scraping source: autoscout24"
+    )
 
-    context.stage_results["new_cars"] = new_cars
-    context.stage_results["not_available_anymore"] = not_available_anymore
+    ingestion_result = SourceIngestionService(
+        build_default_source_registry()
+    ).ingest_full_inventory(
+        source_name="autoscout24",
+        should_fetch_detail=should_fetch_detail_for_listing,
+    )
+
+    compatibility_result = apply_compatibility_inventory_updates(
+        ingestion_result.snapshots,
+        ingestion_result.active_fingerprints,
+        dry_run=context.dry_run,
+    )
+
+    context.stage_results["new_cars"] = compatibility_result.new_cars
+    context.stage_results["not_available_anymore"] = (
+        compatibility_result.not_available_anymore
+    )
 
 
 @register_stage(
