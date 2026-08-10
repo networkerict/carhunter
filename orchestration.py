@@ -223,24 +223,32 @@ def _finish_pipeline_run(
 )
 def stage_scrape(context):
     from sources import SourceIngestionService, build_default_source_registry
+    from source_compatibility import (
+        apply_compatibility_inventory_updates,
+        should_fetch_detail_for_listing,
+    )
 
     debug.info(
         "Scraping source: autoscout24"
     )
 
-    result = SourceIngestionService(
+    ingestion_result = SourceIngestionService(
         build_default_source_registry()
     ).ingest_full_inventory(
         source_name="autoscout24",
-        run_id=context.run_id,
+        should_fetch_detail=should_fetch_detail_for_listing,
+    )
+
+    compatibility_result = apply_compatibility_inventory_updates(
+        ingestion_result.snapshots,
+        ingestion_result.active_fingerprints,
         dry_run=context.dry_run,
     )
 
-    new_cars = result.new_cars
-    not_available_anymore = result.not_available_anymore
-
-    context.stage_results["new_cars"] = new_cars
-    context.stage_results["not_available_anymore"] = not_available_anymore
+    context.stage_results["new_cars"] = compatibility_result.new_cars
+    context.stage_results["not_available_anymore"] = (
+        compatibility_result.not_available_anymore
+    )
 
 
 @register_stage(

@@ -40,7 +40,7 @@ class AutoScout24SourceAdapter(SourceAdapter):
             ),
             configuration_contract={
                 "required": [],
-                "optional": ["enabled", "max_pages", "query_preset"],
+                "optional": ["enabled", "max_pages"],
             },
         )
         return SourceDescriptor(
@@ -128,7 +128,6 @@ class AutoScout24SourceAdapter(SourceAdapter):
 
         field_provenance = self._build_field_provenance(
             extracted_fields=extracted_fields,
-            detail_payload=detail_payload,
             description=description,
             source_listing_id=listing.source_listing_id,
         )
@@ -149,19 +148,15 @@ class AutoScout24SourceAdapter(SourceAdapter):
         self,
         *,
         extracted_fields: Mapping[str, Any],
-        detail_payload: Optional[Mapping[str, Any]],
         description: Optional[str],
         source_listing_id: str,
     ) -> dict[str, dict[str, Any]]:
-        detail_keys = set(detail_payload or {})
         provenance: dict[str, dict[str, Any]] = {}
 
         for field_name in extracted_fields:
             stage = "summary"
             if field_name == "description" and description is not None:
                 stage = "description"
-            elif field_name in detail_keys:
-                stage = "detail"
 
             provenance[field_name] = {
                 "source_name": "autoscout24",

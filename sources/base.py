@@ -43,15 +43,11 @@ class SourceCapabilities:
 class DiscoveryRequest:
     scan_mode: str = "full_inventory"
     max_pages: Optional[int] = None
-    query_preset: Optional[str] = None
 
 
 @dataclass(frozen=True)
 class SourceContext:
     source_name: str
-    run_id: Optional[int]
-    dry_run: bool = False
-    source_config: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

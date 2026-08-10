@@ -25,7 +25,6 @@ SOURCE_REGISTRY = {
     "autoscout24": {
         "enabled": True,
         "max_pages": 100,
-        "query_preset": "audi-a5-cabriolet",
     }
 }
 
