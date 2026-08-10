@@ -236,7 +236,7 @@ Common source interface responsibilities:
 - Discovery/query translation
 - Fetch/listing pagination
 - Raw payload validation
-- Mapping to canonical Car model
+- Mapping to a source-owned `SourceSnapshot` handoff object
 - Source health and diagnostics
 
 ### 7.2 Source Plugin Decision Table
@@ -245,7 +245,7 @@ Common source interface responsibilities:
 |---|---|---|
 | Plugin loading | Config registry | Avoids core changes when adding sources |
 | Failure behavior | Isolated source failure | One source failure must not collapse full pipeline |
-| Output contract | Canonical Car payload only | Keeps downstream logic source-agnostic |
+| Output contract | SourceSnapshot handoff | Preserves a clean boundary so ARCH-003 owns canonical mapping |
 
 ## 8. Vehicle Normalization
 
