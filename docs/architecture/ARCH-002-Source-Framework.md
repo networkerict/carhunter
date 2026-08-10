@@ -4,7 +4,7 @@
 **Project:** CarHunter v3  
 **Status:** Draft 1.0  
 **Scope Type:** Architecture Definition  
-**Depends on:** ARCH-001 – High Level Architecture, [docs/ARCHITECTURE.md](/opt/carhunter/v3.0-dev/docs/ARCHITECTURE.md)  
+**Depends on:** ARCH-001 – High Level Architecture, [docs/ARCHITECTURE.md](../ARCHITECTURE.md)  
 **Defers to:** ARCH-003 – Canonical Car Model / Domain Model
 
 ## Table of Contents
@@ -43,9 +43,9 @@
 
 ## 1. Executive Summary
 
-CarHunter currently ingests vehicle listings through a single AutoScout24-specific implementation in [scraper.py](/opt/carhunter/v3.0-dev/scraper.py). Discovery, source parsing, source-specific normalization, and compatibility with the current persistence model are tightly coupled in one module.
+CarHunter currently ingests vehicle listings through a single AutoScout24-specific implementation in [scraper.py](../../scraper.py). Discovery, source parsing, source-specific normalization, and compatibility with the current persistence model are tightly coupled in one module.
 
-ARCH-002 defines the **Source Framework** that will separate source-specific concerns from application core behavior while preserving the compatibility-first approach defined in [docs/ARCHITECTURE.md](/opt/carhunter/v3.0-dev/docs/ARCHITECTURE.md).
+ARCH-002 defines the **Source Framework** that will separate source-specific concerns from application core behavior while preserving the compatibility-first approach defined in [docs/ARCHITECTURE.md](../ARCHITECTURE.md).
 
 This document defines:
 
@@ -123,14 +123,14 @@ The current implementation is single-source and AutoScout24-specific.
 
 Primary implementation points:
 
-- scrape stage entrypoint: [stage_scrape](/opt/carhunter/v3.0-dev/orchestration.py:224)
-- pipeline scrape runner: [run_scraper](/opt/carhunter/v3.0-dev/scraper.py:803)
-- listing discovery: [fetch_page](/opt/carhunter/v3.0-dev/scraper.py:395), [parse_page](/opt/carhunter/v3.0-dev/scraper.py:403)
-- detail retrieval: [fetch_car_details](/opt/carhunter/v3.0-dev/scraper.py:238)
-- description retrieval: [fetch_description](/opt/carhunter/v3.0-dev/scraper.py:183)
-- source URL normalization: [normalize_url](/opt/carhunter/v3.0-dev/scraper.py:46)
-- source-specific fingerprint construction: [create_fingerprint](/opt/carhunter/v3.0-dev/scraper.py:429)
-- source-specific normalization into current DB payload shape: [normalize_car](/opt/carhunter/v3.0-dev/scraper.py:661)
+- scrape stage entrypoint: [stage_scrape](../../orchestration.py#L224)
+- pipeline scrape runner: [run_scraper](../../scraper.py#L803)
+- listing discovery: [fetch_page](../../scraper.py#L395), [parse_page](../../scraper.py#L403)
+- detail retrieval: [fetch_car_details](../../scraper.py#L238)
+- description retrieval: [fetch_description](../../scraper.py#L183)
+- source URL normalization: [normalize_url](../../scraper.py#L46)
+- source-specific fingerprint construction: [create_fingerprint](../../scraper.py#L429)
+- source-specific normalization into current DB payload shape: [normalize_car](../../scraper.py#L661)
 
 The current scrape flow is:
 
@@ -149,14 +149,14 @@ orchestration.stage_scrape
 
 Source behavior is also reused outside the main scrape stage:
 
-- description updates in [descriptions.py](/opt/carhunter/v3.0-dev/descriptions.py)
-- repair in [repair_engine.py](/opt/carhunter/v3.0-dev/repair_engine.py)
-- backfill/data quality in [data_quality.py](/opt/carhunter/v3.0-dev/data_quality.py)
-- recheck flow in [orchestration.py](/opt/carhunter/v3.0-dev/orchestration.py:471)
+- description updates in [descriptions.py](../../descriptions.py)
+- repair in [repair_engine.py](../../repair_engine.py)
+- backfill/data quality in [data_quality.py](../../data_quality.py)
+- recheck flow in [orchestration.py](../../orchestration.py#L471)
 
 ### 4.3 CURRENT FACT
 
-The current persistence model is still the `cars` table in [database.py](/opt/carhunter/v3.0-dev/database.py:548), with continuity driven by:
+The current persistence model is still the `cars` table in [database.py](../../database.py#L548), with continuity driven by:
 
 - `autoscout_id`
 - `fingerprint`
@@ -447,11 +447,11 @@ Responsibilities:
 
 ### 9.1 CURRENT FACT
 
-Current discovery is a full AutoScout24 page scan in [run_scraper](/opt/carhunter/v3.0-dev/scraper.py:803), using:
+Current discovery is a full AutoScout24 page scan in [run_scraper](../../scraper.py#L803), using:
 
-- hard-coded base URL: [BASE_URL](/opt/carhunter/v3.0-dev/scraper.py:14)
+- hard-coded base URL: [BASE_URL](../../scraper.py#L14)
 - fixed max pages: `PAGES = 100`
-- page parser: [parse_page](/opt/carhunter/v3.0-dev/scraper.py:403)
+- page parser: [parse_page](../../scraper.py#L403)
 - source filtering in scraper logic: only `variant == "Cabriolet"`
 
 ### 9.2 FUTURE DESIGN
@@ -480,7 +480,7 @@ Future discovery modes may include:
 
 ### 10.1 CURRENT FACT
 
-Detailed retrieval is currently source-specific in [fetch_car_details](/opt/carhunter/v3.0-dev/scraper.py:238), with optional separate description retrieval in [fetch_description](/opt/carhunter/v3.0-dev/scraper.py:183).
+Detailed retrieval is currently source-specific in [fetch_car_details](../../scraper.py#L238), with optional separate description retrieval in [fetch_description](../../scraper.py#L183).
 
 ### 10.2 FUTURE DESIGN
 
@@ -515,7 +515,7 @@ AutoScout24 detail retrieval must preserve current extraction of:
 
 ### 11.1 CURRENT FACT
 
-[normalize_car](/opt/carhunter/v3.0-dev/scraper.py:661) currently maps AutoScout24 source data directly into the current `cars`-table payload shape.
+[normalize_car](../../scraper.py#L661) currently maps AutoScout24 source data directly into the current `cars`-table payload shape.
 
 ### 11.2 FUTURE DESIGN
 
@@ -593,9 +593,9 @@ For v3.0, provenance may remain in-memory at the source boundary if the current 
 
 The current scraper mostly logs and returns empty values or `None`, for example in:
 
-- [http_get](/opt/carhunter/v3.0-dev/scraper.py:72)
-- [fetch_description](/opt/carhunter/v3.0-dev/scraper.py:183)
-- [fetch_car_details](/opt/carhunter/v3.0-dev/scraper.py:238)
+- [http_get](../../scraper.py#L72)
+- [fetch_description](../../scraper.py#L183)
+- [fetch_car_details](../../scraper.py#L238)
 
 ### 14.2 FUTURE DESIGN
 
@@ -616,13 +616,13 @@ The framework should define typed source errors, such as:
 
 ### 14.4 v3.0 Required
 
-v3.0 requires isolated source failure behavior aligned with [docs/ARCHITECTURE.md](/opt/carhunter/v3.0-dev/docs/ARCHITECTURE.md:246).
+v3.0 requires isolated source failure behavior aligned with [docs/ARCHITECTURE.md](../ARCHITECTURE.md#L246).
 
 ## 15. Rate Limiting and Request Policy
 
 ### 15.1 CURRENT FACT
 
-Current request behavior uses direct `requests.get(..., timeout=30)` in [http_get](/opt/carhunter/v3.0-dev/scraper.py:72) with a static user agent.
+Current request behavior uses direct `requests.get(..., timeout=30)` in [http_get](../../scraper.py#L72) with a static user agent.
 
 ### 15.2 FUTURE DESIGN
 
@@ -672,7 +672,7 @@ Capabilities let orchestration and compatibility logic choose safe behavior with
 
 ### 17.1 CURRENT FACT
 
-[config.py](/opt/carhunter/v3.0-dev/config.py) does not yet define a source registry or source enablement matrix. The current runtime configuration is minimal and application-wide.
+[config.py](../../config.py) does not yet define a source registry or source enablement matrix. The current runtime configuration is minimal and application-wide.
 
 ### 17.2 FUTURE DESIGN
 
@@ -722,14 +722,14 @@ v3.0 requires at least source-level diagnostics and clear logging when a source 
 
 The current scrape integration is:
 
-- [stage_scrape](/opt/carhunter/v3.0-dev/orchestration.py:224)
-- [run_scraper](/opt/carhunter/v3.0-dev/scraper.py:803)
+- [stage_scrape](../../orchestration.py#L224)
+- [run_scraper](../../scraper.py#L803)
 
 Other source interactions occur directly in:
 
-- [descriptions.py](/opt/carhunter/v3.0-dev/descriptions.py)
-- [repair_engine.py](/opt/carhunter/v3.0-dev/repair_engine.py)
-- [data_quality.py](/opt/carhunter/v3.0-dev/data_quality.py)
+- [descriptions.py](../../descriptions.py)
+- [repair_engine.py](../../repair_engine.py)
+- [data_quality.py](../../data_quality.py)
 
 ### 19.2 FUTURE DESIGN
 
@@ -833,11 +833,11 @@ If a concept is specific to vehicle/listing acquisition, source identity, source
 
 ## 23. Backward Compatibility with the Current `cars` Table
 
-### 22.1 CURRENT FACT
+### 23.1 CURRENT FACT
 
-The current persistence contract is the flat payload consumed by [save_car](/opt/carhunter/v3.0-dev/database.py:265).
+The current persistence contract is the flat payload consumed by [save_car](../../database.py#L265).
 
-### 22.2 FUTURE DESIGN
+### 23.2 FUTURE DESIGN
 
 v3.0 requires a compatibility bridge that translates `SourceSnapshot` into the current `cars`-table payload.
 
@@ -850,7 +850,7 @@ SourceSnapshot
     -> database.save_car
 ```
 
-### 22.3 Compatibility Rule
+### 23.3 Compatibility Rule
 
 The framework must preserve current behavior for:
 
@@ -863,7 +863,7 @@ The framework must preserve current behavior for:
 - `last_price`
 - `price_drop`
 
-### 22.4 v3.0 Required
+### 23.4 v3.0 Required
 
 Single-source compatibility mode must remain operational without requiring a full schema redesign.
 
@@ -871,16 +871,16 @@ Single-source compatibility mode must remain operational without requiring a ful
 
 ### Phase 0 – CURRENT FACT
 
-AutoScout24 behavior is implemented directly in [scraper.py](/opt/carhunter/v3.0-dev/scraper.py).
+AutoScout24 behavior is implemented directly in [scraper.py](../../scraper.py).
 
 ### Phase 1 – v3.0 Required
 
 - introduce `SourceRegistry`
 - introduce `SourceAdapter` contract
 - wrap current AutoScout24 implementation as `AutoScout24SourceAdapter`
-- preserve [database.save_car](/opt/carhunter/v3.0-dev/database.py:265)
+- preserve [database.save_car](../../database.py#L265)
 - add `CurrentCarsCompatibilityBridge`
-- route [stage_scrape](/opt/carhunter/v3.0-dev/orchestration.py:224) through the source framework
+- route [stage_scrape](../../orchestration.py#L224) through the source framework
 
 ### Phase 2 – v3.x Near-Term
 
@@ -896,16 +896,16 @@ AutoScout24 behavior is implemented directly in [scraper.py](/opt/carhunter/v3.0
 
 ## 25. Testing Strategy
 
-### 24.1 CURRENT FACT
+### 25.1 CURRENT FACT
 
 Relevant current tests include:
 
-- [tests/test_orchestration.py](/opt/carhunter/v3.0-dev/tests/test_orchestration.py)
-- [tests/test_sold_detection.py](/opt/carhunter/v3.0-dev/tests/test_sold_detection.py)
-- [tests/test_data_quality.py](/opt/carhunter/v3.0-dev/tests/test_data_quality.py)
-- [tests/test_repair_engine.py](/opt/carhunter/v3.0-dev/tests/test_repair_engine.py)
+- [tests/test_orchestration.py](../../tests/test_orchestration.py)
+- [tests/test_sold_detection.py](../../tests/test_sold_detection.py)
+- [tests/test_data_quality.py](../../tests/test_data_quality.py)
+- [tests/test_repair_engine.py](../../tests/test_repair_engine.py)
 
-### 24.2 FUTURE DESIGN
+### 25.2 FUTURE DESIGN
 
 The Source Framework should add:
 
@@ -917,13 +917,13 @@ The Source Framework should add:
 - source failure isolation tests
 - sold-detection compatibility tests
 
-### 24.3 v3.0 Required
+### 25.3 v3.0 Required
 
 v3.0 must prove that the AutoScout24 adapter preserves the current scrape-to-save behavior under the compatibility bridge.
 
 ## 26. Security Considerations
 
-### 25.1 FUTURE DESIGN
+### 26.1 FUTURE DESIGN
 
 The Source Framework must enforce:
 
@@ -934,17 +934,17 @@ The Source Framework must enforce:
 - no uncontrolled outbound request fan-out
 - sanitized logging for sensitive request metadata
 
-### 25.2 CURRENT FACT
+### 26.2 CURRENT FACT
 
-Telegram secrets already come from `.env` in [telegram.py](/opt/carhunter/v3.0-dev/telegram.py), demonstrating the preferred pattern for secrets separation.
+Telegram secrets already come from `.env` in [telegram.py](../../telegram.py), demonstrating the preferred pattern for secrets separation.
 
 ## 27. Observability Requirements
 
-### 26.1 CURRENT FACT
+### 27.1 CURRENT FACT
 
-Logging today is plain-text file and console logging in [debug.py](/opt/carhunter/v3.0-dev/debug.py).
+Logging today is plain-text file and console logging in [debug.py](../../debug.py).
 
-### 26.2 FUTURE DESIGN
+### 27.2 FUTURE DESIGN
 
 The Source Framework must emit source-oriented diagnostics including:
 
@@ -958,7 +958,7 @@ The Source Framework must emit source-oriented diagnostics including:
 - parse failures
 - degraded/paused state transitions
 
-### 26.3 v3.0 Required
+### 27.3 v3.0 Required
 
 Even if logs remain text-based in v3.0, source-related events must be explicit and consistent enough to support operational debugging.
 
@@ -966,9 +966,9 @@ Even if logs remain text-based in v3.0, source-related events must be explicit a
 
 ARCH-002 must preserve the following constraints:
 
-- compatibility-first evolution from [docs/ARCHITECTURE.md](/opt/carhunter/v3.0-dev/docs/ARCHITECTURE.md)
+- compatibility-first evolution from [docs/ARCHITECTURE.md](../ARCHITECTURE.md)
 - current SQLite-based runtime
-- current orchestration entrypoint in [orchestration.py](/opt/carhunter/v3.0-dev/orchestration.py)
+- current orchestration entrypoint in [orchestration.py](../../orchestration.py)
 - current `cars`-table continuity semantics
 - current scrape-driven sold detection behavior unless source capabilities allow a better strategy
 - current user-visible ranking, deal, watchlist, and notification behavior during migration
