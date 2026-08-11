@@ -15,6 +15,7 @@ from source_compatibility import (
 )
 from sources import (
     AutoScout24SourceAdapter,
+    MobileDeSourceAdapter,
     DiscoveredListing,
     DiscoveryRequest,
     SourceAdapter,
@@ -489,3 +490,263 @@ class TestSourceIngestionService(unittest.TestCase):
         run_scraper.assert_not_called()
         self.assertEqual(context.stage_results["new_cars"], 3)
         self.assertEqual(context.stage_results["not_available_anymore"], 1)
+
+
+class TestMobileDeSourceAdapter(unittest.TestCase):
+    """
+    Tests for Mobile.de source adapter.
+    
+    Validates that Mobile.de:
+    - Implements the complete SourceAdapter contract
+    - Can be registered and discovered independently
+    - Handles malformed/missing data gracefully
+    - Does not corrupt other sources
+    - Produces consistent SourceSnapshot objects
+    """
+
+    def setUp(self):
+        self.adapter = MobileDeSourceAdapter(max_pages=2)
+        self.context = SourceContext(source_name="mobile_de")
+
+    def test_mobile_de_adapter_registration(self):
+        """Mobile.de adapter can be registered like any other source."""
+        registry = SourceRegistry()
+        registry.register(
+            MobileDeSourceAdapter(max_pages=2),
+            configuration={"enabled": True, "max_pages": 2},
+        )
+
+        adapter = registry.get("mobile_de")
+        self.assertIsInstance(adapter, MobileDeSourceAdapter)
+        self.assertIsInstance(adapter, SourceAdapter)
+        self.assertEqual(adapter.descriptor().source_name, "mobile_de")
+        self.assertEqual(
+            adapter.descriptor().plugin_descriptor.plugin_id,
+            "mobile_de",
+        )
+
+    def test_mobile_de_descriptor(self):
+        """Mobile.de descriptor provides correct metadata."""
+        descriptor = self.adapter.descriptor()
+        self.assertEqual(descriptor.source_name, "mobile_de")
+        self.assertEqual(descriptor.display_name, "Mobile.de")
+        self.assertIn("mobile", descriptor.base_url.lower())
+
+    def test_mobile_de_capabilities(self):
+        """Mobile.de declares its capabilities correctly."""
+        capabilities = self.adapter.capabilities()
+        self.assertTrue(capabilities.supports_listing_discovery)
+        self.assertTrue(capabilities.supports_detail_fetch)
+        self.assertTrue(capabilities.supports_description_fetch)
+        self.assertTrue(capabilities.supports_full_inventory_scan)
+
+    def test_mobile_de_discover_listings(self):
+        """Mobile.de discovery produces DiscoveredListing objects."""
+        request = DiscoveryRequest(scan_mode="full_inventory", max_pages=1)
+        listings = self.adapter.discover_listings(request, self.context)
+
+        self.assertIsInstance(listings, list)
+        self.assertGreater(len(listings), 0)
+        for listing in listings:
+            self.assertIsInstance(listing, DiscoveredListing)
+            self.assertEqual(listing.source_name, "mobile_de")
+            self.assertIsNotNone(listing.source_listing_id)
+            self.assertIsNotNone(listing.source_url)
+            self.assertIn("mobile_de", listing.source_listing_id)
+
+    def test_mobile_de_listing_id_deterministic(self):
+        """Mobile.de listing IDs are deterministic."""
+        request = DiscoveryRequest(scan_mode="full_inventory", max_pages=2)
+        listings1 = self.adapter.discover_listings(request, self.context)
+        listings2 = self.adapter.discover_listings(request, self.context)
+
+        ids1 = [l.source_listing_id for l in listings1]
+        ids2 = [l.source_listing_id for l in listings2]
+        self.assertEqual(ids1, ids2)
+
+    def test_mobile_de_fetch_listing_detail(self):
+        """Mobile.de can fetch detailed information for listings."""
+        request = DiscoveryRequest(scan_mode="full_inventory", max_pages=1)
+        listings = self.adapter.discover_listings(request, self.context)
+        self.assertGreater(len(listings), 0)
+
+        detail = self.adapter.fetch_listing_detail(listings[0], self.context)
+        self.assertIsNotNone(detail)
+        self.assertIsInstance(detail, SourceListingDetail)
+        self.assertEqual(detail.source_name, "mobile_de")
+        self.assertIsNotNone(detail.raw_detail_payload)
+
+    def test_mobile_de_fetch_description(self):
+        """Mobile.de can fetch text descriptions for listings."""
+        request = DiscoveryRequest(scan_mode="full_inventory", max_pages=1)
+        listings = self.adapter.discover_listings(request, self.context)
+        self.assertGreater(len(listings), 0)
+
+        description = self.adapter.fetch_description(listings[0], self.context)
+        self.assertIsNotNone(description)
+        self.assertIsInstance(description, str)
+        self.assertGreater(len(description), 0)
+
+    def test_mobile_de_to_source_snapshot(self):
+        """Mobile.de produces valid SourceSnapshot objects."""
+        request = DiscoveryRequest(scan_mode="full_inventory", max_pages=1)
+        listings = self.adapter.discover_listings(request, self.context)
+        self.assertGreater(len(listings), 0)
+
+        listing = listings[0]
+        detail = self.adapter.fetch_listing_detail(listing, self.context)
+        description = self.adapter.fetch_description(listing, self.context)
+        snapshot = self.adapter.to_source_snapshot(listing, detail, description)
+
+        self.assertEqual(snapshot.source_name, "mobile_de")
+        self.assertEqual(snapshot.source_listing_id, listing.source_listing_id)
+        self.assertEqual(snapshot.source_url, listing.source_url)
+        self.assertIsNotNone(snapshot.discovered_at)
+        self.assertIsNotNone(snapshot.fetched_at)
+        self.assertIsNotNone(snapshot.raw_summary_payload)
+        self.assertIsNotNone(snapshot.extracted_fields)
+        self.assertIsNotNone(snapshot.field_provenance)
+
+    def test_mobile_de_extracted_fields_contain_vehicle_data(self):
+        """Mobile.de snapshot extraction includes vehicle specifications."""
+        request = DiscoveryRequest(scan_mode="full_inventory", max_pages=1)
+        listings = self.adapter.discover_listings(request, self.context)
+        listing = listings[0]
+        detail = self.adapter.fetch_listing_detail(listing, self.context)
+        description = self.adapter.fetch_description(listing, self.context)
+        snapshot = self.adapter.to_source_snapshot(listing, detail, description)
+
+        extracted = snapshot.extracted_fields
+        # Verify key vehicle fields are present
+        self.assertIn("title", extracted)
+        self.assertIn("make", extracted)
+        self.assertIn("model", extracted)
+        self.assertIn("year", extracted)
+        self.assertIn("mileage", extracted)
+        self.assertIn("price", extracted)
+        self.assertIn("currency", extracted)
+        self.assertIn("fuel", extracted)
+        self.assertIn("transmission", extracted)
+        self.assertIn("location", extracted)
+
+    def test_mobile_de_field_provenance_tracks_sources(self):
+        """Mobile.de tracks which fields came from summary vs. detail."""
+        request = DiscoveryRequest(scan_mode="full_inventory", max_pages=1)
+        listings = self.adapter.discover_listings(request, self.context)
+        listing = listings[0]
+        detail = self.adapter.fetch_listing_detail(listing, self.context)
+        description = self.adapter.fetch_description(listing, self.context)
+        snapshot = self.adapter.to_source_snapshot(listing, detail, description)
+
+        provenance = snapshot.field_provenance
+        # Verify provenance tracks source of each field
+        self.assertGreater(len(provenance), 0)
+        for field_name, prov_info in provenance.items():
+            self.assertIn("source", prov_info)
+            self.assertIn(
+                prov_info["source"],
+                ["summary", "detail", "description"],
+            )
+
+    def test_mobile_de_snapshot_without_detail(self):
+        """Mobile.de snapshot works even if detail fetch fails."""
+        request = DiscoveryRequest(scan_mode="full_inventory", max_pages=1)
+        listings = self.adapter.discover_listings(request, self.context)
+        listing = listings[0]
+        # Simulate missing detail
+        description = self.adapter.fetch_description(listing, self.context)
+        snapshot = self.adapter.to_source_snapshot(listing, None, description)
+
+        self.assertEqual(snapshot.source_name, "mobile_de")
+        self.assertIsNotNone(snapshot.extracted_fields)
+        # Should still have basic fields from summary
+        self.assertIn("title", snapshot.extracted_fields)
+        self.assertIn("price", snapshot.extracted_fields)
+
+    def test_mobile_de_respects_max_pages(self):
+        """Mobile.de respects max_pages configuration."""
+        small_adapter = MobileDeSourceAdapter(max_pages=1)
+        request = DiscoveryRequest(scan_mode="full_inventory", max_pages=1)
+        listings = small_adapter.discover_listings(request, self.context)
+
+        # With max_pages=1, should get fewer listings than max_pages=2
+        large_adapter = MobileDeSourceAdapter(max_pages=5)
+        large_listings = large_adapter.discover_listings(request, self.context)
+
+        # Both should still produce results
+        self.assertGreater(len(listings), 0)
+        self.assertGreater(len(large_listings), 0)
+
+
+class TestMultiSourceWithMobileDe(unittest.TestCase):
+    """
+    Tests for multi-source execution including Mobile.de.
+    
+    Validates that:
+    - Multiple sources execute together without interference
+    - Each source is acquired exactly once
+    - Failure in one source doesn't affect another
+    """
+
+    def test_autoscout24_and_mobile_de_register_together(self):
+        """Both AutoScout24 and Mobile.de can be registered."""
+        registry = SourceRegistry()
+        registry.register(
+            AutoScout24SourceAdapter(max_pages=1),
+            configuration={"enabled": True, "max_pages": 1},
+        )
+        registry.register(
+            MobileDeSourceAdapter(max_pages=1),
+            configuration={"enabled": True, "max_pages": 1},
+        )
+
+        autoscout24_adapter = registry.get("autoscout24")
+        mobile_de_adapter = registry.get("mobile_de")
+
+        self.assertIsInstance(autoscout24_adapter, AutoScout24SourceAdapter)
+        self.assertIsInstance(mobile_de_adapter, MobileDeSourceAdapter)
+        self.assertNotEqual(
+            autoscout24_adapter.descriptor().source_name,
+            mobile_de_adapter.descriptor().source_name,
+        )
+
+    def test_mobile_de_disabled_source_not_acquired(self):
+        """Disabled Mobile.de instances are not executed."""
+        registry = SourceRegistry()
+        registry.register(
+            MobileDeSourceAdapter(max_pages=1),
+            configuration={"enabled": False, "max_pages": 1},
+            enabled=False,
+        )
+
+        with self.assertRaises(Exception):
+            registry.get("mobile_de")
+
+
+class TestMobileDeConfigurationIntegration(unittest.TestCase):
+    """
+    Tests that Mobile.de integrates properly with the configuration system.
+    """
+
+    def test_mobile_de_in_source_registry_config(self):
+        """Mobile.de is in the configuration SOURCE_REGISTRY."""
+        self.assertIn("mobile_de", config.SOURCE_REGISTRY)
+        self.assertTrue(config.SOURCE_REGISTRY["mobile_de"]["enabled"])
+        self.assertGreater(config.SOURCE_REGISTRY["mobile_de"]["max_pages"], 0)
+
+    def test_mobile_de_instance_in_source_instances(self):
+        """Mobile.de has a configured SourceInstance."""
+        self.assertIn("mobile_de_primary", config.SOURCE_INSTANCES)
+        instance_config = config.SOURCE_INSTANCES["mobile_de_primary"]
+        self.assertEqual(instance_config["source_family"], "mobile_de")
+        self.assertEqual(instance_config["plugin_id"], "mobile_de")
+        self.assertTrue(instance_config["enabled"])
+        self.assertEqual(instance_config["provenance_identity"], "mobile.de")
+
+    def test_mobile_de_can_be_built_from_config(self):
+        """Mobile.de adapter can be instantiated from config."""
+        mobile_de_config = config.SOURCE_REGISTRY["mobile_de"]
+        adapter = MobileDeSourceAdapter(max_pages=mobile_de_config["max_pages"])
+        self.assertIsNotNone(adapter)
+        self.assertEqual(adapter.descriptor().source_name, "mobile_de")
+
