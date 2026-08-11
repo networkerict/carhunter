@@ -122,3 +122,45 @@ class SourceAdapter(Protocol):
         description: Optional[str] = None,
     ) -> SourceSnapshot:
         ...
+
+
+@dataclass(frozen=True)
+class SourceInstance:
+    instance_id: str
+    source_family: str
+    plugin_id: str
+    enabled: bool
+    configuration: Mapping[str, Any]
+    provenance_identity: str
+    validation_state: str = "valid"
+
+
+@dataclass(frozen=True)
+class SourceExecutionResult:
+    source_instance_id: str
+    source_family: str
+    run_id: Optional[str]
+    status: str
+    snapshot_count: int
+    accepted_count: int
+    rejected_count: int
+    duration: float
+    snapshots: Sequence[SourceSnapshot] = field(default_factory=tuple)
+    active_fingerprints: Sequence[str] = field(default_factory=tuple)
+    error_category: Optional[str] = None
+    error_message: Optional[str] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    dry_run: bool = False
+
+
+@dataclass(frozen=True)
+class MultiSourceExecutionResult:
+    run_id: Optional[str]
+    per_instance_results: Sequence[SourceExecutionResult]
+    total_snapshots: int
+    total_accepted: int
+    total_rejected: int
+    overall_outcome: str
+    all_snapshots: Sequence[SourceSnapshot] = field(default_factory=tuple)
+    active_fingerprints: Sequence[str] = field(default_factory=tuple)

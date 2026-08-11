@@ -45,22 +45,30 @@ class OrchestrationTests(unittest.TestCase):
 
     def test_full_mode_uses_canonical_stage_order_and_tracking(self):
         calls = []
-        ingestion_result = mock.Mock(
-            snapshots=[mock.sentinel.snapshot],
-            active_fingerprints=["fp-1"],
-        )
         compatibility_result = mock.Mock(new_cars=2, not_available_anymore=1)
         should_fetch_detail = mock.Mock()
+        
+        # Mock the multi-source coordinator result
+        multi_source_result = mock.Mock(
+            all_snapshots=[mock.sentinel.snapshot],
+            active_fingerprints=["fp-1"],
+            overall_outcome="SUCCESS",
+            total_snapshots=1,
+            total_accepted=1,
+            total_rejected=0,
+            per_instance_results=[],  # Empty list for this test
+        )
 
         with mock.patch(
             "pipeline.start_run",
             side_effect=lambda: calls.append("start_run") or 42,
         ), mock.patch(
             "sources.build_default_source_registry",
-            return_value=mock.sentinel.registry,
-        ), mock.patch(
-            "sources.SourceIngestionService",
-        ) as source_ingestion_service, mock.patch(
+        ) as build_registry, mock.patch(
+            "sources.build_source_instances",
+        ) as build_instances, mock.patch(
+            "sources.build_source_coordinator",
+        ) as build_coordinator, mock.patch(
             "source_compatibility.apply_compatibility_inventory_updates",
             side_effect=lambda snapshots, active_fingerprints, dry_run=False: calls.append("persist") or compatibility_result,
         ), mock.patch(
@@ -110,9 +118,10 @@ class OrchestrationTests(unittest.TestCase):
             "pipeline_report.print_summary",
             side_effect=lambda run_id: calls.append(("print_summary", run_id)),
         ):
-            source_ingestion_service.return_value.ingest_full_inventory.side_effect = (
-                lambda **kwargs: calls.append("scrape") or ingestion_result
-            )
+            build_instances.return_value = []
+            coordinator_mock = mock.Mock()
+            coordinator_mock.execute_sources.side_effect = lambda instances, run_id=None, dry_run=False, should_fetch_detail=None: calls.append("scrape") or multi_source_result
+            build_coordinator.return_value = coordinator_mock
             context = orchestration.run_pipeline(
                 "full"
             )
@@ -141,10 +150,6 @@ class OrchestrationTests(unittest.TestCase):
         self.assertEqual(context.stage_results["new_cars"], 2)
         self.assertEqual(context.stage_results["deal_scores_updated"], 5)
         self.assertEqual(context.stage_results["high_score_cars"], 6)
-        source_ingestion_service.return_value.ingest_full_inventory.assert_called_once_with(
-            source_name="autoscout24",
-            should_fetch_detail=should_fetch_detail,
-        )
 
     def test_cli_processing_modes_delegate_to_canonical_pipeline(self):
         cases = [
