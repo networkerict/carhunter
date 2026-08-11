@@ -442,18 +442,24 @@ class TestSourceIngestionService(unittest.TestCase):
         self.assertEqual(len(result.snapshots), 2)
 
     def test_orchestration_stage_uses_registry(self):
-        ingestion_result = SourceIngestionResult(
-            source_name="autoscout24",
-            snapshots=[mock.sentinel.snapshot],
+        # Multi-source coordinator result with snapshots
+        multi_source_result = mock.Mock(
+            all_snapshots=[mock.sentinel.snapshot],
             active_fingerprints=["fp-1"],
+            overall_outcome="SUCCESS",
+            total_snapshots=1,
+            total_accepted=1,
+            total_rejected=0,
+            per_instance_results=[],  # Empty list for this test
         )
 
         with mock.patch(
             "sources.build_default_source_registry",
-            return_value=mock.sentinel.registry,
         ) as build_registry, mock.patch(
-            "sources.SourceIngestionService",
-        ) as service_cls, mock.patch(
+            "sources.build_source_instances",
+        ) as build_instances, mock.patch(
+            "sources.build_source_coordinator",
+        ) as build_coordinator, mock.patch(
             "source_compatibility.apply_compatibility_inventory_updates",
             return_value=mock.Mock(new_cars=3, not_available_anymore=1),
         ) as apply_updates, mock.patch(
@@ -462,19 +468,22 @@ class TestSourceIngestionService(unittest.TestCase):
         ), mock.patch(
             "scraper.run_scraper",
         ) as run_scraper:
-            service_cls.return_value.ingest_full_inventory.return_value = ingestion_result
+            
+            build_instances.return_value = []
+            coordinator_mock = mock.Mock()
+            coordinator_mock.execute_sources.return_value = multi_source_result
+            build_coordinator.return_value = coordinator_mock
+            
             context = orchestration.PipelineContext(mode="full")
             orchestration.stage_scrape(context)
 
         build_registry.assert_called_once_with()
-        service_cls.assert_called_once_with(mock.sentinel.registry)
-        service_cls.return_value.ingest_full_inventory.assert_called_once_with(
-            source_name="autoscout24",
-            should_fetch_detail=mock.sentinel.should_fetch_detail,
-        )
+        build_instances.assert_called_once()
+        build_coordinator.assert_called_once()
+        coordinator_mock.execute_sources.assert_called_once()
         apply_updates.assert_called_once_with(
-            ingestion_result.snapshots,
-            ingestion_result.active_fingerprints,
+            multi_source_result.all_snapshots,
+            multi_source_result.active_fingerprints,
             dry_run=False,
         )
         run_scraper.assert_not_called()

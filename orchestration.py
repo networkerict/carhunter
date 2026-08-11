@@ -219,29 +219,55 @@ def _finish_pipeline_run(
 
 @register_stage(
     "scrape",
-    "Scrape AutoScout24 and update the inventory.",
+    "Scrape vehicle listings from configured sources.",
 )
 def stage_scrape(context):
-    from sources import SourceIngestionService, build_default_source_registry
+    from sources import (
+        build_default_source_registry,
+        build_source_instances,
+        build_source_coordinator,
+    )
     from source_compatibility import (
         apply_compatibility_inventory_updates,
         should_fetch_detail_for_listing,
     )
 
-    debug.info(
-        "Scraping source: autoscout24"
-    )
+    debug.info("Starting multi-source inventory scrape")
 
-    ingestion_result = SourceIngestionService(
-        build_default_source_registry()
-    ).ingest_full_inventory(
-        source_name="autoscout24",
+    # Build the registry, load instances, and create coordinator
+    registry = build_default_source_registry()
+    instances = build_source_instances(registry)
+    coordinator = build_source_coordinator(registry)
+
+    # Execute all configured sources through the coordinator
+    # CRITICAL: Each source is acquired EXACTLY ONCE
+    execution_result = coordinator.execute_sources(
+        instances,
+        run_id=getattr(context, "run_id", None),
+        dry_run=context.dry_run,
         should_fetch_detail=should_fetch_detail_for_listing,
     )
 
+    debug.info(
+        f"Scrape complete: {execution_result.overall_outcome}. "
+        f"Snapshots: {execution_result.total_snapshots}, "
+        f"Accepted: {execution_result.total_accepted}, "
+        f"Rejected: {execution_result.total_rejected}"
+    )
+
+    # Log per-instance results
+    for result in execution_result.per_instance_results:
+        debug.info(
+            f"  Source {result.source_instance_id}: "
+            f"{result.status} ({result.snapshot_count} snapshots) "
+            f"({result.duration:.2f}s)"
+        )
+
+    # All snapshots are now in execution_result.all_snapshots
+    # NO DUPLICATE INGESTION - use result directly
     compatibility_result = apply_compatibility_inventory_updates(
-        ingestion_result.snapshots,
-        ingestion_result.active_fingerprints,
+        execution_result.all_snapshots,
+        execution_result.active_fingerprints,
         dry_run=context.dry_run,
     )
 
@@ -249,6 +275,7 @@ def stage_scrape(context):
     context.stage_results["not_available_anymore"] = (
         compatibility_result.not_available_anymore
     )
+    context.stage_results["execution_result"] = execution_result
 
 
 @register_stage(
