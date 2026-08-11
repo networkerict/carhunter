@@ -29,6 +29,11 @@ SOURCE_REGISTRY = {
     "autoscout24": {
         "enabled": True,
         "max_pages": 100,
+    },
+    "mobile_de": {
+        "enabled": True,
+        "max_pages": 10,
+        "page_size": 50,
     }
 }
 
@@ -42,7 +47,12 @@ SOURCE_INSTANCES = {
         "plugin_id": "autoscout24",
         "enabled": True,
         "provenance_identity": "autoscout24.de",
-        # Additional instance-specific configuration can be added here
+    },
+    "mobile_de_primary": {
+        "source_family": "mobile_de",
+        "plugin_id": "mobile_de",
+        "enabled": True,
+        "provenance_identity": "mobile.de",
     }
 }
 

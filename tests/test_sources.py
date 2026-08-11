@@ -489,3 +489,429 @@ class TestSourceIngestionService(unittest.TestCase):
         run_scraper.assert_not_called()
         self.assertEqual(context.stage_results["new_cars"], 3)
         self.assertEqual(context.stage_results["not_available_anymore"], 1)
+
+
+# ============================================================================
+# ARCH-010: MOBILE.DE SEARCH API TESTS
+# ============================================================================
+
+class TestMobileDeAPIClient:
+    """Test Mobile.de API client."""
+
+    def test_client_creation_with_credentials(self):
+        """Test API client instantiation with credentials."""
+        from sources.mobile_de import MobileDeAPIClient
+
+        client = MobileDeAPIClient(username="test_user", password="test_pass")
+        assert client.username == "test_user"
+        assert client.password == "test_pass"
+        assert client.credentials_available()
+
+    def test_client_creation_without_credentials(self):
+        """Test API client without credentials."""
+        from sources.mobile_de import MobileDeAPIClient
+        import os
+
+        # Ensure environment variables are not set
+        os.environ.pop("MOBILE_DE_API_USERNAME", None)
+        os.environ.pop("MOBILE_DE_API_PASSWORD", None)
+
+        client = MobileDeAPIClient()
+        assert not client.credentials_available()
+
+    def test_client_auth_header_building(self):
+        """Test HTTP Basic Auth header construction."""
+        from sources.mobile_de import MobileDeAPIClient
+        import base64
+
+        client = MobileDeAPIClient(username="user", password="pass")
+        auth_header = client._build_auth_header()
+
+        # Should be "Basic <base64-encoded-user:pass>"
+        assert auth_header.startswith("Basic ")
+        encoded_part = auth_header.split(" ")[1]
+        decoded = base64.b64decode(encoded_part).decode()
+        assert decoded == "user:pass"
+
+
+class TestMobileDeAdapter:
+    """Test Mobile.de source adapter."""
+
+    def test_adapter_creation(self):
+        """Test adapter instantiation."""
+        from sources.mobile_de import MobileDeSourceAdapter, MobileDeAPIClient
+
+        client = MobileDeAPIClient(username="test", password="test")
+        adapter = MobileDeSourceAdapter(api_client=client, max_pages=5)
+        assert adapter.api_client == client
+        assert adapter.max_pages == 5
+
+    def test_adapter_descriptor(self):
+        """Test adapter descriptor."""
+        from sources.mobile_de import MobileDeSourceAdapter
+
+        adapter = MobileDeSourceAdapter()
+        descriptor = adapter.descriptor()
+
+        assert descriptor.source_name == "mobile_de"
+        assert descriptor.display_name == "Mobile.de"
+        assert descriptor.base_url == "https://www.mobile.de"
+        assert descriptor.plugin_descriptor.plugin_id == "mobile_de"
+
+    def test_adapter_capabilities(self):
+        """Test adapter capabilities."""
+        from sources.mobile_de import MobileDeSourceAdapter
+
+        adapter = MobileDeSourceAdapter()
+        capabilities = adapter.capabilities()
+
+        assert capabilities.supports_listing_discovery
+        assert capabilities.supports_detail_fetch
+        assert capabilities.supports_description_fetch
+        assert capabilities.supports_full_inventory_scan
+
+    def test_parse_ad_listing_valid(self):
+        """Test parsing a valid ad listing."""
+        from sources.mobile_de import MobileDeSourceAdapter
+        from sources.base import SourceContext
+        from datetime import datetime
+
+        adapter = MobileDeSourceAdapter()
+        context = SourceContext(source_name="mobile_de")
+        discovered_at = datetime.now()
+
+        # Official Mobile.de API response example
+        ad = {
+            "mobileAdId": "15012",
+            "detailPageUrl": "https://suchen.mobile.de/auto-inserat/abarth-500-w-stheuterode/15012.html",
+            "make": "ABARTH",
+            "model": "500",
+            "modelDescription": "500 TwinAir",
+            "condition": "USED",
+            "firstRegistration": "202007",
+            "mileage": 500,
+            "fuel": "DIESEL",
+            "category": "EstateCar",
+            "price": {
+                "consumerPriceGross": "1000.00",
+                "currency": "EUR",
+                "type": "FIXED"
+            },
+            "seller": {
+                "mobileSellerId": "11",
+                "type": "DEALER",
+                "commercial": True,
+                "companyName": "Test Dealer",
+                "email": "test@dealer.de",
+                "address": {
+                    "city": "Berlin",
+                    "zipcode": "10115",
+                    "country": "DE"
+                },
+                "geoData": {
+                    "lat": 52.5200,
+                    "lon": 13.4050
+                }
+            },
+            "plainTextDescription": "Well-maintained vehicle"
+        }
+
+        listing = adapter._parse_ad_listing(ad, discovered_at, context)
+        assert listing is not None
+        assert listing.source_listing_id == "15012"
+        assert listing.source_name == "mobile_de"
+        assert "15012" in listing.source_url
+
+    def test_parse_ad_listing_missing_id(self):
+        """Test parsing ad without mobile_ad_id returns None."""
+        from sources.mobile_de import MobileDeSourceAdapter
+        from sources.base import SourceContext
+        from datetime import datetime
+
+        adapter = MobileDeSourceAdapter()
+        context = SourceContext(source_name="mobile_de")
+        discovered_at = datetime.now()
+
+        ad = {
+            "make": "BMW",
+            "model": "3 Series",
+            # Missing mobileAdId
+        }
+
+        listing = adapter._parse_ad_listing(ad, discovered_at, context)
+        assert listing is None
+
+    def test_extract_fields_complete(self):
+        """Test field extraction from complete ad."""
+        from sources.mobile_de import MobileDeSourceAdapter
+
+        adapter = MobileDeSourceAdapter()
+
+        ad = {
+            "make": "BMW",
+            "model": "3 Series",
+            "modelDescription": "320d xDrive",
+            "condition": "USED",
+            "firstRegistration": "201803",
+            "mileage": 125000,
+            "fuel": "DIESEL",
+            "category": "Sedan",
+            "price": {
+                "consumerPriceGross": "25500.00",
+                "currency": "EUR"
+            },
+            "damageUnrepaired": False,
+            "seller": {
+                "type": "DEALER",
+                "commercial": True,
+                "companyName": "BMW Dealer",
+                "email": "info@bmwdealer.de",
+                "address": {
+                    "city": "Munich",
+                    "zipcode": "80331",
+                    "country": "DE"
+                },
+                "geoData": {
+                    "lat": 48.1351,
+                    "lon": 11.5820
+                }
+            },
+            "plainTextDescription": "Excellent condition"
+        }
+
+        extracted = adapter._extract_fields(ad)
+
+        assert extracted["make"] == "BMW"
+        assert extracted["model"] == "3 Series"
+        assert extracted["model_variant"] == "320d xDrive"
+        assert extracted["year"] == 2018
+        assert extracted["mileage"] == 125000
+        assert extracted["fuel"] == "DIESEL"
+        assert extracted["body_type"] == "Sedan"
+        assert extracted["price_gross"] == 25500.00
+        assert extracted["currency"] == "EUR"
+        assert extracted["seller_name"] == "BMW Dealer"
+        assert extracted["location_city"] == "Munich"
+        assert extracted["description"] == "Excellent condition"
+
+    def test_extract_fields_partial(self):
+        """Test field extraction with missing optional fields."""
+        from sources.mobile_de import MobileDeSourceAdapter
+
+        adapter = MobileDeSourceAdapter()
+
+        ad = {
+            "make": "Audi",
+            "model": "A4",
+            "mileage": 75000,
+            # Missing: modelDescription, year, price details, seller, etc.
+        }
+
+        extracted = adapter._extract_fields(ad)
+
+        # Should include present fields
+        assert extracted["make"] == "Audi"
+        assert extracted["model"] == "A4"
+        assert extracted["mileage"] == 75000
+
+        # Should NOT fabricate missing fields
+        assert "model_variant" not in extracted
+        assert "price_gross" not in extracted
+        assert "seller_name" not in extracted
+
+    def test_extract_fields_with_description(self):
+        """Test field extraction with explicit description."""
+        from sources.mobile_de import MobileDeSourceAdapter
+
+        adapter = MobileDeSourceAdapter()
+        ad = {"make": "BMW"}
+        custom_description = "Custom description text"
+
+        extracted = adapter._extract_fields(ad, description=custom_description)
+        assert extracted["description"] == custom_description
+
+    def test_extract_fields_no_description(self):
+        """Test field extraction falls back to plainTextDescription."""
+        from sources.mobile_de import MobileDeSourceAdapter
+
+        adapter = MobileDeSourceAdapter()
+        ad = {
+            "make": "BMW",
+            "plainTextDescription": "From API response"
+        }
+
+        extracted = adapter._extract_fields(ad, description=None)
+        assert extracted["description"] == "From API response"
+
+
+class TestMobileDeConfiguration:
+    """Test Mobile.de configuration and registration."""
+
+    def test_mobile_de_in_registry(self):
+        """Test Mobile.de is in source registry config."""
+        import config
+
+        assert "mobile_de" in config.SOURCE_REGISTRY
+        assert config.SOURCE_REGISTRY["mobile_de"]["enabled"] is True
+
+    def test_mobile_de_instance_configured(self):
+        """Test Mobile.de instance is configured."""
+        import config
+
+        assert "mobile_de_primary" in config.SOURCE_INSTANCES
+        instance_config = config.SOURCE_INSTANCES["mobile_de_primary"]
+        assert instance_config["source_family"] == "mobile_de"
+        assert instance_config["plugin_id"] == "mobile_de"
+        assert instance_config["enabled"] is True
+
+    def test_mobile_de_registration(self):
+        """Test Mobile.de adapter registers correctly."""
+        from sources import build_default_source_registry
+
+        registry = build_default_source_registry()
+        adapter = registry.get("mobile_de")
+        assert adapter is not None
+        from sources.mobile_de import MobileDeSourceAdapter
+        assert isinstance(adapter, MobileDeSourceAdapter)
+
+    def test_mobile_de_instance_creation(self):
+        """Test Mobile.de source instance is created."""
+        from sources import build_default_source_registry, build_source_instances
+
+        registry = build_default_source_registry()
+        instances = build_source_instances(registry)
+
+        mobile_de_instances = [i for i in instances if i.source_family == "mobile_de"]
+        assert len(mobile_de_instances) > 0
+        assert mobile_de_instances[0].instance_id == "mobile_de_primary"
+
+
+class TestMobileDeIntegration:
+    """Integration tests for Mobile.de with coordinator."""
+
+    def test_mobile_de_and_autoscout24_both_available(self):
+        """Test both AutoScout24 and Mobile.de are available."""
+        from sources import build_default_source_registry
+
+        registry = build_default_source_registry()
+        autoscout24_adapter = registry.get("autoscout24")
+        mobile_de_adapter = registry.get("mobile_de")
+
+        assert autoscout24_adapter is not None
+        assert mobile_de_adapter is not None
+
+    def test_mobile_de_descriptor_distinct(self):
+        """Test Mobile.de descriptor is distinct from AutoScout24."""
+        from sources.mobile_de import MobileDeSourceAdapter
+        from sources.autoscout24 import AutoScout24SourceAdapter
+
+        mobile_de = MobileDeSourceAdapter()
+        autoscout24 = AutoScout24SourceAdapter()
+
+        assert mobile_de.descriptor().source_name != autoscout24.descriptor().source_name
+        assert "mobile_de" in mobile_de.descriptor().plugin_descriptor.plugin_id
+
+
+class TestMobileDeCredentials:
+    """Test credential handling."""
+
+    def test_credentials_from_environment(self, monkeypatch):
+        """Test credentials loaded from environment variables."""
+        import os
+        from sources.mobile_de import MobileDeAPIClient
+
+        monkeypatch.setenv("MOBILE_DE_API_USERNAME", "env_user")
+        monkeypatch.setenv("MOBILE_DE_API_PASSWORD", "env_pass")
+
+        client = MobileDeAPIClient()
+        assert client.username == "env_user"
+        assert client.password == "env_pass"
+        assert client.credentials_available()
+
+    def test_credentials_not_logged(self):
+        """Test credentials are not accidentally logged."""
+        from sources.mobile_de import MobileDeAPIClient
+
+        client = MobileDeAPIClient(username="secret_user", password="secret_pass")
+        # The repr/str should not contain credentials
+        str_repr = str(client)
+        assert "secret_user" not in str_repr
+        assert "secret_pass" not in str_repr
+
+
+class TestMobileDeErrorHandling:
+    """Test error handling."""
+
+    def test_missing_credentials_raises_error(self):
+        """Test missing credentials raises proper error."""
+        import os
+        from sources.mobile_de import (
+            MobileDeSourceAdapter,
+            MobileDeAPIClient,
+            SourceCredentialsError,
+        )
+        from sources.base import DiscoveryRequest, SourceContext
+
+        # Ensure no credentials
+        os.environ.pop("MOBILE_DE_API_USERNAME", None)
+        os.environ.pop("MOBILE_DE_API_PASSWORD", None)
+
+        adapter = MobileDeSourceAdapter()
+        request = DiscoveryRequest()
+        context = SourceContext(source_name="mobile_de")
+
+        try:
+            adapter.discover_listings(request, context)
+            assert False, "Should have raised SourceCredentialsError"
+        except SourceCredentialsError:
+            pass  # Expected
+
+    def test_malformed_listing_skipped(self):
+        """Test malformed listing doesn't break discovery."""
+        from sources.mobile_de import MobileDeSourceAdapter, MobileDeAPIClient
+        from sources.base import DiscoveryRequest, SourceContext
+        from unittest.mock import Mock, MagicMock
+        from datetime import datetime
+
+        # Create adapter with mocked API client
+        mock_client = Mock(spec=MobileDeAPIClient)
+        mock_client.credentials_available.return_value = True
+
+        adapter = MobileDeSourceAdapter(api_client=mock_client)
+        request = DiscoveryRequest()
+        context = SourceContext(source_name="mobile_de")
+
+        # Mock API response with one valid and one malformed ad
+        mock_response = {
+            "ads": [
+                {
+                    "mobileAdId": "valid1",
+                    "detailPageUrl": "https://mobile.de/auto/valid1",
+                    "make": "BMW",
+                    "model": "3 Series",
+                },
+                {
+                    # Malformed: missing mobileAdId
+                    "detailPageUrl": "https://mobile.de/auto/invalid",
+                    "make": "Audi",
+                },
+                {
+                    "mobileAdId": "valid2",
+                    "detailPageUrl": "https://mobile.de/auto/valid2",
+                    "make": "Mercedes",
+                    "model": "C-Class",
+                },
+            ],
+            "currentPage": 1,
+            "maxPages": 1,
+        }
+
+        mock_client.get_json.return_value = mock_response
+
+        listings = adapter.discover_listings(request, context)
+
+        # Should have 2 valid listings (malformed one skipped)
+        assert len(listings) == 2
+        assert listings[0].source_listing_id == "valid1"
+        assert listings[1].source_listing_id == "valid2"
+

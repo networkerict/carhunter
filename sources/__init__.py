@@ -3,6 +3,7 @@ from __future__ import annotations
 import config
 
 from .autoscout24 import AutoScout24SourceAdapter
+from .mobile_de import MobileDeSourceAdapter
 from .base import (
     DiscoveredListing,
     DiscoveryRequest,
@@ -24,12 +25,28 @@ from .service import SourceIngestionResult, SourceIngestionService
 
 def build_default_source_registry() -> SourceRegistry:
     registry = SourceRegistry()
-    autoscout24_config = config.SOURCE_REGISTRY["autoscout24"]
-    registry.register(
-        AutoScout24SourceAdapter(max_pages=autoscout24_config["max_pages"]),
-        configuration=autoscout24_config,
-        enabled=autoscout24_config.get("enabled", True),
-    )
+    
+    # Register AutoScout24
+    autoscout24_config = config.SOURCE_REGISTRY.get("autoscout24", {})
+    if autoscout24_config:
+        registry.register(
+            AutoScout24SourceAdapter(max_pages=autoscout24_config.get("max_pages", 100)),
+            configuration=autoscout24_config,
+            enabled=autoscout24_config.get("enabled", True),
+        )
+    
+    # Register Mobile.de
+    mobile_de_config = config.SOURCE_REGISTRY.get("mobile_de", {})
+    if mobile_de_config:
+        registry.register(
+            MobileDeSourceAdapter(
+                max_pages=mobile_de_config.get("max_pages", 10),
+                page_size=mobile_de_config.get("page_size", 50),
+            ),
+            configuration=mobile_de_config,
+            enabled=mobile_de_config.get("enabled", True),
+        )
+    
     return registry
 
 
@@ -73,6 +90,7 @@ def build_source_coordinator(registry: SourceRegistry) -> SourceExecutionCoordin
 
 __all__ = [
     "AutoScout24SourceAdapter",
+    "MobileDeSourceAdapter",
     "DiscoveredListing",
     "DiscoveryRequest",
     "MultiSourceExecutionResult",
