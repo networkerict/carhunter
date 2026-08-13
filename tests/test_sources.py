@@ -587,22 +587,21 @@ class TestSourceIngestionService(unittest.TestCase):
                 ("WAU1111111111",),
             )
             vehicle_id = conn.execute("SELECT id FROM vehicles WHERE vin = ?", ("WAU1111111111",)).fetchone()[0]
-            conn.execute(
-                "INSERT OR IGNORE INTO listings (source_id, source_listing_id, source_listing_row_id, vehicle_id, status) VALUES (?, ?, ?, ?, 'linked')",
-                (source_row[0], "as-410", source_listing_row[0], vehicle_id),
-            )
             listing_id = conn.execute("SELECT id FROM listings WHERE source_listing_row_id = ?", (source_listing_row[0],)).fetchone()[0]
+            conn.execute(
+                "UPDATE listings SET vehicle_id = ?, status = 'linked' WHERE id = ?",
+                (vehicle_id, listing_id),
+            )
 
             outcome_listing_id, outcome_vehicle_id, outcome = database.resolve_canonical_listing_and_vehicle(snapshot, conn=conn)
             provenance = conn.execute(
                 "SELECT outcome, review_required FROM listing_vehicle_mappings WHERE listing_id = ? ORDER BY id DESC LIMIT 1",
                 (listing_id,),
             ).fetchone()
-            resolved_vehicle_id = conn.execute("SELECT vehicle_id FROM listings WHERE id = ?", (listing_id,)).fetchone()[0]
             self.assertEqual(outcome_listing_id, listing_id)
-            self.assertEqual(outcome_vehicle_id, resolved_vehicle_id)
-            self.assertEqual(outcome, "MATCHED_EXISTING_VEHICLE")
-            self.assertEqual(provenance[0], "MATCHED_EXISTING_VEHICLE")
+            self.assertEqual(outcome_vehicle_id, vehicle_id)
+            self.assertEqual(outcome, "EXISTING_LISTING")
+            self.assertEqual(provenance[0], "EXISTING_LISTING")
             self.assertEqual(provenance[1], 0)
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM vehicles WHERE vin = ?", ("WAU1111111111",)).fetchone()[0], 1)
         finally:
@@ -637,24 +636,24 @@ class TestSourceIngestionService(unittest.TestCase):
             vehicle_a = conn.execute("SELECT id FROM vehicles WHERE vin = ?", ("WAU1111111111",)).fetchone()[0]
             conn.execute("INSERT INTO vehicles (vin, make, model, status) VALUES (?, 'Audi', 'A5', 'active')", ("WAU2222222222",))
             vehicle_b = conn.execute("SELECT id FROM vehicles WHERE vin = ?", ("WAU2222222222",)).fetchone()[0]
-            conn.execute(
-                "INSERT OR IGNORE INTO listings (source_id, source_listing_id, source_listing_row_id, vehicle_id, status) VALUES (?, ?, ?, ?, 'linked')",
-                (source_row[0], "as-420", source_listing_row[0], vehicle_a),
-            )
             listing_id = conn.execute("SELECT id FROM listings WHERE source_listing_row_id = ?", (source_listing_row[0],)).fetchone()[0]
+            conn.execute(
+                "UPDATE listings SET vehicle_id = ?, status = 'linked' WHERE id = ?",
+                (vehicle_a, listing_id),
+            )
 
             outcome_listing_id, outcome_vehicle_id, outcome = database.resolve_canonical_listing_and_vehicle(snapshot, conn=conn)
             provenance = conn.execute(
                 "SELECT outcome, review_required, evidence FROM listing_vehicle_mappings WHERE listing_id = ? ORDER BY id DESC LIMIT 1",
                 (listing_id,),
             ).fetchone()
-            resolved_vehicle_id = conn.execute("SELECT vehicle_id FROM listings WHERE id = ?", (listing_id,)).fetchone()[0]
             self.assertEqual(outcome_listing_id, listing_id)
-            self.assertEqual(outcome_vehicle_id, resolved_vehicle_id)
-            self.assertEqual(outcome, "MATCHED_EXISTING_VEHICLE")
-            self.assertEqual(provenance[0], "MATCHED_EXISTING_VEHICLE")
-            self.assertEqual(provenance[1], 0)
-            self.assertEqual(resolved_vehicle_id, vehicle_b)
+            self.assertEqual(outcome_vehicle_id, vehicle_a)
+            self.assertEqual(outcome, "OPERATOR_REVIEW")
+            self.assertEqual(provenance[0], "OPERATOR_REVIEW")
+            self.assertEqual(provenance[1], 1)
+            self.assertIn("authoritative_vin_conflict", provenance[2])
+            self.assertEqual(conn.execute("SELECT vehicle_id FROM listings WHERE id = ?", (listing_id,)).fetchone()[0], vehicle_a)
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM vehicles WHERE vin = ?", ("WAU2222222222",)).fetchone()[0], 1)
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM vehicles WHERE id IN (?, ?)", (vehicle_a, vehicle_b)).fetchone()[0], 2)
         finally:
@@ -687,24 +686,23 @@ class TestSourceIngestionService(unittest.TestCase):
             ).fetchone()
             conn.execute("INSERT INTO vehicles (vin, make, model, status) VALUES (NULL, 'Audi', 'A5', 'active')")
             vehicle_id = conn.execute("SELECT id FROM vehicles WHERE vin IS NULL ORDER BY id DESC LIMIT 1").fetchone()[0]
-            conn.execute(
-                "INSERT OR IGNORE INTO listings (source_id, source_listing_id, source_listing_row_id, vehicle_id, status) VALUES (?, ?, ?, ?, 'linked')",
-                (source_row[0], "as-430", source_listing_row[0], vehicle_id),
-            )
             listing_id = conn.execute("SELECT id FROM listings WHERE source_listing_row_id = ?", (source_listing_row[0],)).fetchone()[0]
+            conn.execute(
+                "UPDATE listings SET vehicle_id = ?, status = 'linked' WHERE id = ?",
+                (vehicle_id, listing_id),
+            )
 
             outcome_listing_id, outcome_vehicle_id, outcome = database.resolve_canonical_listing_and_vehicle(snapshot, conn=conn)
             provenance = conn.execute(
                 "SELECT outcome, review_required FROM listing_vehicle_mappings WHERE listing_id = ? ORDER BY id DESC LIMIT 1",
                 (listing_id,),
             ).fetchone()
-            resolved_vehicle_id = conn.execute("SELECT vehicle_id FROM listings WHERE id = ?", (listing_id,)).fetchone()[0]
             self.assertEqual(outcome_listing_id, listing_id)
-            self.assertEqual(outcome_vehicle_id, resolved_vehicle_id)
-            self.assertEqual(outcome, "CREATED_NEW_VEHICLE")
-            self.assertEqual(provenance[0], "CREATED_NEW_VEHICLE")
+            self.assertEqual(outcome_vehicle_id, vehicle_id)
+            self.assertEqual(outcome, "MATCHED_EXISTING_VEHICLE")
+            self.assertEqual(provenance[0], "MATCHED_EXISTING_VEHICLE")
             self.assertEqual(provenance[1], 0)
-            self.assertEqual(conn.execute("SELECT vin FROM vehicles WHERE id = ?", (resolved_vehicle_id,)).fetchone()[0], "WAU3333333333")
+            self.assertEqual(conn.execute("SELECT vin FROM vehicles WHERE id = ?", (vehicle_id,)).fetchone()[0], "WAU3333333333")
         finally:
             conn.close()
 
