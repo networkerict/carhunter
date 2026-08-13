@@ -18,8 +18,9 @@ def car(**overrides):
     return SimpleNamespace(**values)
 
 
-def test_calculate_car_score_missing_km_gets_no_kilometer_bonus():
-    assert calculate_car_score(car()) == 0
+@pytest.mark.parametrize("km", [None, 0])
+def test_calculate_car_score_missing_km_gets_no_kilometer_bonus(km):
+    assert calculate_car_score(car(km=km)) == 0
 
 
 @pytest.mark.parametrize(
@@ -30,8 +31,9 @@ def test_calculate_car_score_preserves_kilometer_boundaries(km, expected_score):
     assert calculate_car_score(car(km=km)) == expected_score
 
 
-def test_calculate_value_score_missing_km_keeps_base_and_price_score():
-    score, breakdown = calculate_value_score(car(km=None, price=39_999), explain=True)
+@pytest.mark.parametrize("km", [None, 0])
+def test_calculate_value_score_missing_km_keeps_base_and_price_score(km):
+    score, breakdown = calculate_value_score(car(km=km, price=39_999), explain=True)
 
     assert score == 70
     assert [item["reason"] for item in breakdown] == [

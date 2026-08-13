@@ -70,10 +70,10 @@ def calculate_car_score(car, explain=False):
 
     km = car.km
 
-    if km is not None and km < 20000:
+    if km not in (None, 0) and km < 20000:
         add(10, "<20.000 km")
 
-    elif km is not None and km < 40000:
+    elif km not in (None, 0) and km < 40000:
         add(5, "<40.000 km")
 
 
@@ -134,10 +134,10 @@ def calculate_value_score(car, explain=False):
         add(5, "Prijs < €50.000")
 
 
-    if km is not None and km < 30000:
+    if km not in (None, 0) and km < 30000:
         add(15, "<30.000 km")
 
-    elif km is not None and km < 50000:
+    elif km not in (None, 0) and km < 50000:
         add(10, "<50.000 km")
 
 
