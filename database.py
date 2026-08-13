@@ -295,6 +295,7 @@ def _semantic_observation_payload(snapshot):
         "source_name": getattr(snapshot, "source_name", ""),
         "source_listing_id": getattr(snapshot, "source_listing_id", ""),
         "extracted_fields": _hashable_value(extracted_fields),
+        "normalized_availability": _listing_availability(snapshot),
     }
     return _hashable_value(payload)
 
@@ -629,7 +630,7 @@ def _snapshot_is_newer(snapshot, latest_snapshot_id, conn):
     return True
 
 
-def _first_snapshot_field(snapshot, *field_names):
+def _first_snapshot_field_with_name(snapshot, *field_names, nested_keys=()):
     for mapping in (
         dict(getattr(snapshot, "extracted_fields", {}) or {}),
         dict(getattr(snapshot, "raw_summary_payload", {}) or {}),
@@ -638,27 +639,46 @@ def _first_snapshot_field(snapshot, *field_names):
         for field_name in field_names:
             if field_name in mapping:
                 value = mapping.get(field_name)
+                if isinstance(value, dict) and nested_keys:
+                    for nested_key in nested_keys:
+                        if nested_key in value:
+                            return field_name, value.get(nested_key)
                 if value is not None:
-                    return value
-    return None
+                    return field_name, value
+    return None, None
+
+
+def _first_snapshot_field(snapshot, *field_names, nested_keys=()):
+    _, value = _first_snapshot_field_with_name(snapshot, *field_names, nested_keys=nested_keys)
+    return value
 
 
 def _listing_availability(snapshot):
-    value = _first_snapshot_field(
+    field_name, value = _first_snapshot_field_with_name(
         snapshot,
         "availability",
         "listing_status",
         "status",
         "is_available",
         "available",
+        "isAvailable",
+        "available",
         "sold",
+        "isSold",
+        "soldStatus",
+        nested_keys=("consumerPriceGross", "price_gross", "priceGross", "gross_price", "status", "sold", "available", "is_available", "isAvailable"),
     )
     if value is None:
         return "ACTIVE"
+    if isinstance(value, bool):
+        if field_name in {"is_available", "isAvailable", "available"}:
+            return "ACTIVE" if value else "INACTIVE"
+        if field_name in {"sold", "isSold", "soldStatus"}:
+            return "SOLD" if value else "ACTIVE"
     normalized = str(value).strip().upper()
     if normalized in {"ACTIVE", "AVAILABLE", "TRUE", "YES", "LISTED", "OPEN"}:
         return "ACTIVE"
-    if normalized in {"INACTIVE", "UNAVAILABLE", "NOT_AVAILABLE", "REMOVED", "DELETED"}:
+    if normalized in {"INACTIVE", "UNAVAILABLE", "NOT_AVAILABLE", "REMOVED", "DELETED", "FALSE", "NO"}:
         return "INACTIVE"
     if normalized in {"SOLD", "ENDED", "EXPIRED"}:
         return "SOLD"
@@ -704,7 +724,17 @@ def _sync_listing_current_state(snapshot, listing_id, source_snapshot_id, conn=N
             return False
 
         incoming_price = _coerce_int(
-            _first_snapshot_field(snapshot, "price", "listing_price", "current_price", "consumerPriceGross")
+            _first_snapshot_field(
+                snapshot,
+                "price_gross",
+                "priceGross",
+                "consumerPriceGross",
+                "gross_price",
+                "price",
+                "listing_price",
+                "current_price",
+                nested_keys=("consumerPriceGross", "price_gross", "priceGross", "gross_price"),
+            )
         )
         incoming_mileage = _coerce_int(
             _first_snapshot_field(snapshot, "km", "mileage", "mileage_in_km", "mileageInKm")

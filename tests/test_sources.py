@@ -1482,6 +1482,127 @@ class TestCanonicalListingCurrentState(unittest.TestCase):
         finally:
             conn.close()
 
+    def test_mobile_de_price_gross_sets_listing_current_price(self):
+        db_path = os.path.join(self.tempdir.name, "listing-price-gross.db")
+        config.DATABASE = db_path
+        database.get_connection().close()
+
+        snapshot = SourceSnapshot(
+            source_name="mobile_de",
+            source_listing_id="mobile-price-1",
+            source_url="https://www.mobile.de/auto-inserat/mobile-price-1",
+            discovered_at=datetime(2025, 3, 1, 10, 0, 0),
+            fetched_at=datetime(2025, 3, 1, 10, 5, 0),
+            raw_summary_payload={
+                "mobileAdId": "mobile-price-1",
+                "price": {"consumerPriceGross": 25500},
+            },
+            raw_detail_payload={"description": "Nice Audi"},
+            extracted_fields={
+                "fingerprint": "fp-mobile-price-1",
+                "price_gross": 25500,
+                "description": "Nice Audi",
+            },
+            field_provenance={"price_gross": {"source_name": "mobile_de"}},
+        )
+
+        snapshot_id = database.save_source_snapshot(snapshot)
+        self.assertIsNotNone(snapshot_id)
+
+        conn = database.get_connection()
+        try:
+            listing_row = conn.execute(
+                "SELECT current_price, current_mileage, availability FROM listings WHERE source_listing_id = ?",
+                ("mobile-price-1",),
+            ).fetchone()
+            self.assertEqual(listing_row[0], 25500)
+            self.assertIsNone(listing_row[1])
+            self.assertEqual(listing_row[2], "ACTIVE")
+        finally:
+            conn.close()
+
+    def test_status_change_creates_new_semantic_observation_and_updates_availability(self):
+        db_path = os.path.join(self.tempdir.name, "listing-status-change.db")
+        config.DATABASE = db_path
+        database.get_connection().close()
+
+        active = SourceSnapshot(
+            source_name="autoscout24",
+            source_listing_id="listing-status-1",
+            source_url="https://example.com/listing-status-1",
+            discovered_at=datetime(2025, 4, 1, 9, 0, 0),
+            fetched_at=datetime(2025, 4, 1, 9, 5, 0),
+            raw_summary_payload={"id": "listing-status-1", "status": "active"},
+            raw_detail_payload={"description": "Active listing"},
+            extracted_fields={"fingerprint": "fp-listing-status-1", "price": 20000, "status": "active"},
+            field_provenance={"status": {"source_name": "autoscout24"}},
+        )
+        sold = SourceSnapshot(
+            source_name="autoscout24",
+            source_listing_id="listing-status-1",
+            source_url="https://example.com/listing-status-1",
+            discovered_at=datetime(2025, 4, 2, 9, 0, 0),
+            fetched_at=datetime(2025, 4, 2, 9, 5, 0),
+            raw_summary_payload={"id": "listing-status-1", "status": "sold"},
+            raw_detail_payload={"description": "Sold listing"},
+            extracted_fields={"fingerprint": "fp-listing-status-1", "price": 20000, "status": "sold"},
+            field_provenance={"status": {"source_name": "autoscout24"}},
+        )
+
+        first_id = database.save_source_snapshot(active)
+        second_id = database.save_source_snapshot(sold)
+        self.assertNotEqual(first_id, second_id)
+
+        conn = database.get_connection()
+        try:
+            snapshot_count = conn.execute(
+                "SELECT COUNT(*) FROM source_snapshots WHERE source_listing_id = ?",
+                ("listing-status-1",),
+            ).fetchone()[0]
+            listing_row = conn.execute(
+                "SELECT availability, latest_source_snapshot_id FROM listings WHERE source_listing_id = ?",
+                ("listing-status-1",),
+            ).fetchone()
+            self.assertEqual(snapshot_count, 2)
+            self.assertEqual(listing_row[0], "SOLD")
+            self.assertEqual(listing_row[1], second_id)
+        finally:
+            conn.close()
+
+    def test_boolean_availability_values_are_respected(self):
+        db_path = os.path.join(self.tempdir.name, "listing-boolean-availability.db")
+        config.DATABASE = db_path
+        database.get_connection().close()
+
+        for field_name, raw_value, expected in [
+            ("is_available", True, "ACTIVE"),
+            ("is_available", False, "INACTIVE"),
+            ("available", False, "INACTIVE"),
+            ("sold", True, "SOLD"),
+            ("sold", False, "ACTIVE"),
+        ]:
+            snapshot = SourceSnapshot(
+                source_name="autoscout24",
+                source_listing_id=f"bool-{field_name}-{raw_value}",
+                source_url=f"https://example.com/bool-{field_name}-{raw_value}",
+                discovered_at=datetime(2025, 5, 1, 8, 0, 0),
+                fetched_at=datetime(2025, 5, 1, 8, 5, 0),
+                raw_summary_payload={field_name: raw_value},
+                raw_detail_payload={"description": "bool test"},
+                extracted_fields={"fingerprint": f"fp-{field_name}-{raw_value}", field_name: raw_value},
+                field_provenance={field_name: {"source_name": "autoscout24"}},
+            )
+            database.save_source_snapshot(snapshot)
+            conn = database.get_connection()
+            try:
+                row = conn.execute(
+                    "SELECT availability FROM listings WHERE source_listing_id = ?",
+                    (f"bool-{field_name}-{raw_value}",),
+                ).fetchone()
+                self.assertEqual(row[0], expected)
+            finally:
+                conn.close()
+
     def test_existing_listing_defaults_to_unknown(self):
         db_path = os.path.join(self.tempdir.name, "listing-default-unknown.db")
         config.DATABASE = db_path
