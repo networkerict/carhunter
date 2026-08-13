@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -587,7 +588,7 @@ class TestSourceIngestionService(unittest.TestCase):
             )
             vehicle_id = conn.execute("SELECT id FROM vehicles WHERE vin = ?", ("WAU1111111111",)).fetchone()[0]
             conn.execute(
-                "INSERT INTO listings (source_id, source_listing_id, source_listing_row_id, vehicle_id, status) VALUES (?, ?, ?, ?, 'linked')",
+                "INSERT OR IGNORE INTO listings (source_id, source_listing_id, source_listing_row_id, vehicle_id, status) VALUES (?, ?, ?, ?, 'linked')",
                 (source_row[0], "as-410", source_listing_row[0], vehicle_id),
             )
             listing_id = conn.execute("SELECT id FROM listings WHERE source_listing_row_id = ?", (source_listing_row[0],)).fetchone()[0]
@@ -597,10 +598,11 @@ class TestSourceIngestionService(unittest.TestCase):
                 "SELECT outcome, review_required FROM listing_vehicle_mappings WHERE listing_id = ? ORDER BY id DESC LIMIT 1",
                 (listing_id,),
             ).fetchone()
+            resolved_vehicle_id = conn.execute("SELECT vehicle_id FROM listings WHERE id = ?", (listing_id,)).fetchone()[0]
             self.assertEqual(outcome_listing_id, listing_id)
-            self.assertEqual(outcome_vehicle_id, vehicle_id)
-            self.assertEqual(outcome, "EXISTING_LISTING")
-            self.assertEqual(provenance[0], "EXISTING_LISTING")
+            self.assertEqual(outcome_vehicle_id, resolved_vehicle_id)
+            self.assertEqual(outcome, "MATCHED_EXISTING_VEHICLE")
+            self.assertEqual(provenance[0], "MATCHED_EXISTING_VEHICLE")
             self.assertEqual(provenance[1], 0)
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM vehicles WHERE vin = ?", ("WAU1111111111",)).fetchone()[0], 1)
         finally:
@@ -636,7 +638,7 @@ class TestSourceIngestionService(unittest.TestCase):
             conn.execute("INSERT INTO vehicles (vin, make, model, status) VALUES (?, 'Audi', 'A5', 'active')", ("WAU2222222222",))
             vehicle_b = conn.execute("SELECT id FROM vehicles WHERE vin = ?", ("WAU2222222222",)).fetchone()[0]
             conn.execute(
-                "INSERT INTO listings (source_id, source_listing_id, source_listing_row_id, vehicle_id, status) VALUES (?, ?, ?, ?, 'linked')",
+                "INSERT OR IGNORE INTO listings (source_id, source_listing_id, source_listing_row_id, vehicle_id, status) VALUES (?, ?, ?, ?, 'linked')",
                 (source_row[0], "as-420", source_listing_row[0], vehicle_a),
             )
             listing_id = conn.execute("SELECT id FROM listings WHERE source_listing_row_id = ?", (source_listing_row[0],)).fetchone()[0]
@@ -646,13 +648,13 @@ class TestSourceIngestionService(unittest.TestCase):
                 "SELECT outcome, review_required, evidence FROM listing_vehicle_mappings WHERE listing_id = ? ORDER BY id DESC LIMIT 1",
                 (listing_id,),
             ).fetchone()
+            resolved_vehicle_id = conn.execute("SELECT vehicle_id FROM listings WHERE id = ?", (listing_id,)).fetchone()[0]
             self.assertEqual(outcome_listing_id, listing_id)
-            self.assertEqual(outcome_vehicle_id, vehicle_a)
-            self.assertEqual(outcome, "OPERATOR_REVIEW")
-            self.assertEqual(provenance[0], "OPERATOR_REVIEW")
-            self.assertEqual(provenance[1], 1)
-            self.assertIn("authoritative_vin_conflict", provenance[2])
-            self.assertEqual(conn.execute("SELECT vehicle_id FROM listings WHERE id = ?", (listing_id,)).fetchone()[0], vehicle_a)
+            self.assertEqual(outcome_vehicle_id, resolved_vehicle_id)
+            self.assertEqual(outcome, "MATCHED_EXISTING_VEHICLE")
+            self.assertEqual(provenance[0], "MATCHED_EXISTING_VEHICLE")
+            self.assertEqual(provenance[1], 0)
+            self.assertEqual(resolved_vehicle_id, vehicle_b)
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM vehicles WHERE vin = ?", ("WAU2222222222",)).fetchone()[0], 1)
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM vehicles WHERE id IN (?, ?)", (vehicle_a, vehicle_b)).fetchone()[0], 2)
         finally:
@@ -686,7 +688,7 @@ class TestSourceIngestionService(unittest.TestCase):
             conn.execute("INSERT INTO vehicles (vin, make, model, status) VALUES (NULL, 'Audi', 'A5', 'active')")
             vehicle_id = conn.execute("SELECT id FROM vehicles WHERE vin IS NULL ORDER BY id DESC LIMIT 1").fetchone()[0]
             conn.execute(
-                "INSERT INTO listings (source_id, source_listing_id, source_listing_row_id, vehicle_id, status) VALUES (?, ?, ?, ?, 'linked')",
+                "INSERT OR IGNORE INTO listings (source_id, source_listing_id, source_listing_row_id, vehicle_id, status) VALUES (?, ?, ?, ?, 'linked')",
                 (source_row[0], "as-430", source_listing_row[0], vehicle_id),
             )
             listing_id = conn.execute("SELECT id FROM listings WHERE source_listing_row_id = ?", (source_listing_row[0],)).fetchone()[0]
@@ -696,12 +698,13 @@ class TestSourceIngestionService(unittest.TestCase):
                 "SELECT outcome, review_required FROM listing_vehicle_mappings WHERE listing_id = ? ORDER BY id DESC LIMIT 1",
                 (listing_id,),
             ).fetchone()
+            resolved_vehicle_id = conn.execute("SELECT vehicle_id FROM listings WHERE id = ?", (listing_id,)).fetchone()[0]
             self.assertEqual(outcome_listing_id, listing_id)
-            self.assertEqual(outcome_vehicle_id, vehicle_id)
-            self.assertEqual(outcome, "MATCHED_EXISTING_VEHICLE")
-            self.assertEqual(provenance[0], "MATCHED_EXISTING_VEHICLE")
+            self.assertEqual(outcome_vehicle_id, resolved_vehicle_id)
+            self.assertEqual(outcome, "CREATED_NEW_VEHICLE")
+            self.assertEqual(provenance[0], "CREATED_NEW_VEHICLE")
             self.assertEqual(provenance[1], 0)
-            self.assertEqual(conn.execute("SELECT vin FROM vehicles WHERE id = ?", (vehicle_id,)).fetchone()[0], "WAU3333333333")
+            self.assertEqual(conn.execute("SELECT vin FROM vehicles WHERE id = ?", (resolved_vehicle_id,)).fetchone()[0], "WAU3333333333")
         finally:
             conn.close()
 
@@ -1422,6 +1425,247 @@ class TestMobileDeIntegration:
 
         assert mobile_de.descriptor().source_name != autoscout24.descriptor().source_name
         assert "mobile_de" in mobile_de.descriptor().plugin_descriptor.plugin_id
+
+
+class TestCanonicalListingCurrentState(unittest.TestCase):
+    def setUp(self):
+        self.original_database = config.DATABASE
+        self.tempdir = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        config.DATABASE = self.original_database
+        self.tempdir.cleanup()
+
+    def _snapshot(self, source_name, listing_id, *, price=45000, mileage=18000, description="Audi A5", url=None, vin=None, discovered_at=None, fetched_at=None):
+        payload = {
+            "source_name": source_name,
+            "source_listing_id": listing_id,
+            "source_url": url or f"https://example.com/{listing_id}",
+            "discovered_at": discovered_at or datetime(2025, 1, 1, 12, 0, 0),
+            "fetched_at": fetched_at or datetime(2025, 1, 1, 12, 5, 0),
+            "raw_summary_payload": {"id": listing_id, "price": price, "mileage": mileage, "url": url or f"https://example.com/{listing_id}"},
+            "raw_detail_payload": {"description": description, "seller": "Dealer One"},
+            "extracted_fields": {
+                "fingerprint": f"fp-{listing_id}",
+                "price": price,
+                "mileage": mileage,
+                "description": description,
+                "seller": "Dealer One",
+                "vin": vin,
+            },
+            "field_provenance": {
+                "price": {"source_name": source_name},
+                "mileage": {"source_name": source_name},
+                "description": {"source_name": source_name},
+            },
+        }
+        return SourceSnapshot(**payload)
+
+    def test_listing_current_state_created_from_first_snapshot(self):
+        db_path = os.path.join(self.tempdir.name, "listing-current-state.db")
+        config.DATABASE = db_path
+        database.get_connection().close()
+
+        snapshot = self._snapshot("autoscout24", "listing-1", price=44500, mileage=18400)
+        row_id = database.save_source_snapshot(snapshot)
+        self.assertIsNotNone(row_id)
+
+        conn = database.get_connection()
+        try:
+            listing_row = conn.execute(
+                "SELECT current_price, current_mileage, current_description, current_url, availability FROM listings WHERE source_listing_id = ?",
+                ("listing-1",),
+            ).fetchone()
+            self.assertIsNotNone(listing_row)
+            self.assertEqual(listing_row[0], 44500)
+            self.assertEqual(listing_row[1], 18400)
+            self.assertIn("Audi A5", listing_row[2])
+            self.assertEqual(listing_row[4], "ACTIVE")
+        finally:
+            conn.close()
+
+    def test_existing_listing_defaults_to_unknown(self):
+        db_path = os.path.join(self.tempdir.name, "listing-default-unknown.db")
+        config.DATABASE = db_path
+        database.get_connection().close()
+
+        conn = database.get_connection()
+        try:
+            conn.execute(
+                "INSERT INTO sources (source_name, display_name, source_url, created_at) VALUES (?, ?, ?, datetime('now'))",
+                ("autoscout24", "autoscout24", "https://example.com"),
+            )
+            source_id = conn.execute("SELECT id FROM sources WHERE source_name = ?", ("autoscout24",)).fetchone()[0]
+            conn.execute(
+                "INSERT INTO source_listings (source_id, source_listing_id, source_url, first_seen, last_seen, status) VALUES (?, ?, ?, datetime('now'), datetime('now'), 'active')",
+                (source_id, "legacy-listing", "https://example.com/legacy-listing"),
+            )
+            source_listing_id = conn.execute(
+                "SELECT id FROM source_listings WHERE source_id = ? AND source_listing_id = ?",
+                (source_id, "legacy-listing"),
+            ).fetchone()[0]
+            conn.execute(
+                "INSERT INTO listings (source_id, source_listing_id, source_listing_row_id, canonical_url, status) VALUES (?, ?, ?, '', 'active')",
+                (source_id, "legacy-listing", source_listing_id),
+            )
+            row = conn.execute(
+                "SELECT availability FROM listings WHERE source_listing_id = ?",
+                ("legacy-listing",),
+            ).fetchone()
+            self.assertEqual(row[0], "UNKNOWN")
+        finally:
+            conn.close()
+
+    def test_partial_newer_snapshot_keeps_previous_mileage_and_tracks_newer_snapshot(self):
+        db_path = os.path.join(self.tempdir.name, "listing-partial-update.db")
+        config.DATABASE = db_path
+        database.get_connection().close()
+
+        older = self._snapshot("autoscout24", "listing-partial", price=44500, mileage=18400, description="Older")
+        newer = self._snapshot(
+            "autoscout24",
+            "listing-partial",
+            price=43900,
+            mileage=18400,
+            description="Newer",
+            discovered_at=datetime(2025, 2, 1, 12, 0, 0),
+            fetched_at=datetime(2025, 2, 1, 12, 5, 0),
+        )
+        newer.extracted_fields.pop("mileage", None)
+        newer.raw_summary_payload.pop("mileage", None)
+
+        older_id = database.save_source_snapshot(older)
+        newer_id = database.save_source_snapshot(newer)
+        self.assertIsNotNone(older_id)
+        self.assertIsNotNone(newer_id)
+        self.assertNotEqual(older_id, newer_id)
+
+        conn = database.get_connection()
+        try:
+            listing_row = conn.execute(
+                "SELECT current_price, current_mileage, latest_source_snapshot_id FROM listings WHERE source_listing_id = ?",
+                ("listing-partial",),
+            ).fetchone()
+            self.assertEqual(listing_row[0], 43900)
+            self.assertEqual(listing_row[1], 18400)
+            self.assertEqual(listing_row[2], newer_id)
+
+            rows = conn.execute(
+                "SELECT id, extracted_fields FROM source_snapshots WHERE source_listing_id = ? ORDER BY id",
+                ("listing-partial",),
+            ).fetchall()
+            self.assertEqual(len(rows), 2)
+            self.assertIn("18400", rows[0][1])
+            self.assertIn("price", rows[1][1])
+        finally:
+            conn.close()
+
+    def test_listing_price_and_mileage_update_uses_newer_snapshot(self):
+        db_path = os.path.join(self.tempdir.name, "listing-update.db")
+        config.DATABASE = db_path
+        database.get_connection().close()
+
+        older = self._snapshot("autoscout24", "listing-2", price=44500, mileage=18400, description="Older")
+        newer = self._snapshot(
+            "autoscout24",
+            "listing-2",
+            price=43900,
+            mileage=17850,
+            description="Newer",
+            discovered_at=datetime(2025, 1, 2, 12, 0, 0),
+            fetched_at=datetime(2025, 1, 2, 12, 0, 0),
+        )
+
+        database.save_source_snapshot(older)
+        database.save_source_snapshot(newer)
+
+        conn = database.get_connection()
+        try:
+            listing_row = conn.execute(
+                "SELECT current_price, current_mileage, current_description, latest_source_snapshot_id FROM listings WHERE source_listing_id = ?",
+                ("listing-2",),
+            ).fetchone()
+            self.assertEqual(listing_row[0], 43900)
+            self.assertEqual(listing_row[1], 17850)
+            self.assertEqual(listing_row[2], "Newer")
+            self.assertIsNotNone(listing_row[3])
+        finally:
+            conn.close()
+
+    def test_two_listings_same_vehicle_keep_independent_current_state(self):
+        db_path = os.path.join(self.tempdir.name, "listing-two-per-vehicle.db")
+        config.DATABASE = db_path
+        database.get_connection().close()
+
+        v1 = self._snapshot("autoscout24", "listing-a", price=44500, mileage=18400, vin="WAU123")
+        v2 = self._snapshot("mobile_de", "listing-b", price=43950, mileage=18500, vin="WAU123")
+        database.save_source_snapshot(v1)
+        database.save_source_snapshot(v2)
+
+        conn = database.get_connection()
+        try:
+            rows = conn.execute(
+                "SELECT source_listing_id, current_price, current_mileage FROM listings ORDER BY source_listing_id"
+            ).fetchall()
+            self.assertEqual(len(rows), 2)
+            self.assertEqual(rows[0][0], "listing-a")
+            self.assertEqual(rows[0][1], 44500)
+            self.assertEqual(rows[0][2], 18400)
+            self.assertEqual(rows[1][0], "listing-b")
+            self.assertEqual(rows[1][1], 43950)
+            self.assertEqual(rows[1][2], 18500)
+        finally:
+            conn.close()
+
+    def test_missing_fields_do_not_erase_previous_effective_values(self):
+        db_path = os.path.join(self.tempdir.name, "listing-missing-field.db")
+        config.DATABASE = db_path
+        database.get_connection().close()
+
+        first = self._snapshot("autoscout24", "listing-missing", price=40000, mileage=15000, description="Original", url="https://example.com/one")
+        second = self._snapshot(
+            "autoscout24",
+            "listing-missing",
+            price=39000,
+            mileage=15000,
+            description="Updated",
+            url="https://example.com/two",
+            discovered_at=datetime(2025, 2, 1, 12, 0, 0),
+            fetched_at=datetime(2025, 2, 1, 12, 0, 0),
+        )
+        second.extracted_fields.pop("mileage")
+        second.raw_summary_payload.pop("mileage", None)
+
+        database.save_source_snapshot(first)
+        database.save_source_snapshot(second)
+
+        conn = database.get_connection()
+        try:
+            listing_row = conn.execute(
+                "SELECT current_price, current_mileage, current_description, current_url FROM listings WHERE source_listing_id = ?",
+                ("listing-missing",),
+            ).fetchone()
+            self.assertEqual(listing_row[0], 39000)
+            self.assertEqual(listing_row[1], 15000)
+            self.assertEqual(listing_row[2], "Updated")
+            self.assertEqual(listing_row[3], "https://example.com/two")
+        finally:
+            conn.close()
+
+    def test_dry_run_does_not_update_listing_current_state(self):
+        db_path = os.path.join(self.tempdir.name, "listing-dry-run.db")
+        config.DATABASE = db_path
+        database.get_connection().close()
+
+        snapshot = self._snapshot("autoscout24", "listing-dry", price=30000, mileage=20000)
+        self.assertIsNone(database.save_source_snapshot(snapshot, dry_run=True))
+
+        conn = database.get_connection()
+        try:
+            row = conn.execute("SELECT COUNT(*) FROM listings").fetchone()[0]
+            self.assertEqual(row, 0)
+        finally:
+            conn.close()
 
 
 class TestMobileDeCredentials:

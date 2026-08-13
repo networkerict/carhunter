@@ -7,6 +7,7 @@ import hashlib
 import json
 import sqlite3
 import os
+from datetime import datetime
 
 import config
 import debug
@@ -424,6 +425,10 @@ def save_source_snapshot(snapshot, *, dry_run=False, conn=None):
         ).fetchone()
         snapshot_row_id = snapshot_row[0]
 
+        listing_id_for_state = _ensure_canonical_listing(snapshot, conn=conn)
+        if listing_id_for_state is not None:
+            _sync_listing_current_state(snapshot, listing_id_for_state, snapshot_row_id, conn=conn)
+
         conn.execute(
             """
             INSERT INTO source_provenance (
@@ -553,12 +558,214 @@ def _canonical_vehicle_payload(snapshot):
     return normalized
 
 
-def _ensure_canonical_listing(snapshot, conn=None):
-    conn = conn or get_connection()
+def _coerce_int(value):
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        candidate = value.strip()
+        if not candidate:
+            return None
+        try:
+            return int(float(candidate))
+        except ValueError:
+            return None
+    return None
+
+
+def _coerce_text(value):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        stripped = value.strip()
+        return stripped or None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        text = str(value).strip()
+        return text or None
+    return str(value).strip() or None
+
+
+def _snapshot_time(snapshot):
+    for key in ("fetched_at", "discovered_at"):
+        value = getattr(snapshot, key, None)
+        if value is not None:
+            if hasattr(value, "isoformat"):
+                return value
+    return None
+
+
+def _snapshot_is_newer(snapshot, latest_snapshot_id, conn):
+    if latest_snapshot_id is None:
+        return True
+    if snapshot is None:
+        return False
+    current_time = _snapshot_time(snapshot)
+    if current_time is None:
+        return True
+    row = conn.execute(
+        "SELECT fetched_at, discovered_at FROM source_snapshots WHERE id = ?",
+        (latest_snapshot_id,),
+    ).fetchone()
+    if row is None:
+        return True
+    latest_fetched = row[0]
+    latest_discovered = row[1]
+    try:
+        if latest_fetched and latest_fetched != "":
+            latest_dt = datetime.fromisoformat(latest_fetched)
+        elif latest_discovered and latest_discovered != "":
+            latest_dt = datetime.fromisoformat(latest_discovered)
+        else:
+            return True
+    except ValueError:
+        return True
+    if current_time and hasattr(current_time, "isoformat"):
+        return current_time >= latest_dt
+    return True
+
+
+def _first_snapshot_field(snapshot, *field_names):
+    for mapping in (
+        dict(getattr(snapshot, "extracted_fields", {}) or {}),
+        dict(getattr(snapshot, "raw_summary_payload", {}) or {}),
+        dict(getattr(snapshot, "raw_detail_payload", {}) or {}),
+    ):
+        for field_name in field_names:
+            if field_name in mapping:
+                value = mapping.get(field_name)
+                if value is not None:
+                    return value
+    return None
+
+
+def _listing_availability(snapshot):
+    value = _first_snapshot_field(
+        snapshot,
+        "availability",
+        "listing_status",
+        "status",
+        "is_available",
+        "available",
+        "sold",
+    )
+    if value is None:
+        return "ACTIVE"
+    normalized = str(value).strip().upper()
+    if normalized in {"ACTIVE", "AVAILABLE", "TRUE", "YES", "LISTED", "OPEN"}:
+        return "ACTIVE"
+    if normalized in {"INACTIVE", "UNAVAILABLE", "NOT_AVAILABLE", "REMOVED", "DELETED"}:
+        return "INACTIVE"
+    if normalized in {"SOLD", "ENDED", "EXPIRED"}:
+        return "SOLD"
+    if normalized in {"UNKNOWN", "NULL", ""}:
+        return "UNKNOWN"
+    return "ACTIVE"
+
+
+def _sync_listing_current_state(snapshot, listing_id, source_snapshot_id, conn=None):
+    """Update the canonical listing's effective current state.
+
+    The row stores the latest accepted SourceSnapshot for the whole listing state.
+    Field-level provenance remains in source_snapshots/source_provenance and is
+    not flattened into a per-field listing column.
+    """
+    if snapshot is None or listing_id is None:
+        return False
     should_close = conn is None
-    if conn is None:
-        conn = get_connection()
-        should_close = True
+    conn = conn or get_connection()
+
+    try:
+        row = conn.execute(
+            """
+            SELECT
+                current_price,
+                current_mileage,
+                current_description,
+                current_seller,
+                current_url,
+                current_options,
+                availability,
+                latest_source_snapshot_id
+            FROM listings
+            WHERE id = ?
+            """,
+            (listing_id,),
+        ).fetchone()
+        if row is None:
+            return False
+
+        current_price, current_mileage, current_description, current_seller, current_url, current_options, current_availability, latest_snapshot_id = row
+        if source_snapshot_id is not None and not _snapshot_is_newer(snapshot, latest_snapshot_id, conn):
+            return False
+
+        incoming_price = _coerce_int(
+            _first_snapshot_field(snapshot, "price", "listing_price", "current_price", "consumerPriceGross")
+        )
+        incoming_mileage = _coerce_int(
+            _first_snapshot_field(snapshot, "km", "mileage", "mileage_in_km", "mileageInKm")
+        )
+        incoming_description = _coerce_text(
+            _first_snapshot_field(snapshot, "description", "description_text", "listing_description")
+        )
+        incoming_seller = _coerce_text(
+            _first_snapshot_field(snapshot, "seller", "dealer", "seller_name", "dealer_name")
+        )
+        incoming_url = _coerce_text(getattr(snapshot, "source_url", "") or "")
+        incoming_options = _first_snapshot_field(snapshot, "options", "options_found", "equipment", "equipment_list")
+        incoming_availability = _listing_availability(snapshot)
+
+        update_values = {
+            "current_price": incoming_price if incoming_price is not None else current_price,
+            "current_mileage": incoming_mileage if incoming_mileage is not None else current_mileage,
+            "current_description": incoming_description if incoming_description is not None else current_description,
+            "current_seller": incoming_seller if incoming_seller is not None else current_seller,
+            "current_url": incoming_url if incoming_url else current_url,
+            "current_options": _canonical_json(incoming_options) if incoming_options is not None else current_options,
+            "availability": incoming_availability if incoming_availability else (current_availability or "ACTIVE"),
+            "latest_source_snapshot_id": source_snapshot_id,
+        }
+
+        conn.execute(
+            """
+            UPDATE listings
+            SET
+                current_price = ?,
+                current_mileage = ?,
+                current_description = ?,
+                current_seller = ?,
+                current_url = ?,
+                current_options = ?,
+                availability = ?,
+                latest_source_snapshot_id = ?,
+                updated_at = datetime('now')
+            WHERE id = ?
+            """,
+            (
+                update_values["current_price"],
+                update_values["current_mileage"],
+                update_values["current_description"],
+                update_values["current_seller"],
+                update_values["current_url"],
+                update_values["current_options"],
+                update_values["availability"],
+                update_values["latest_source_snapshot_id"],
+                listing_id,
+            ),
+        )
+        return True
+    finally:
+        if should_close:
+            conn.close()
+
+
+def _ensure_canonical_listing(snapshot, conn=None):
+    should_close = conn is None
+    conn = conn or get_connection()
 
     try:
         source_name = str(getattr(snapshot, "source_name", "") or "").strip()
@@ -597,7 +804,7 @@ def _ensure_canonical_listing(snapshot, conn=None):
 
         conn.execute(
             """
-            INSERT INTO listings (
+            INSERT OR IGNORE INTO listings (
                 source_id,
                 source_listing_id,
                 source_listing_row_id,
@@ -609,10 +816,11 @@ def _ensure_canonical_listing(snapshot, conn=None):
             """,
             (source_id, source_listing_id, source_listing_db_id, str(getattr(snapshot, "source_url", "") or "")),
         )
-        return conn.execute(
+        row = conn.execute(
             "SELECT id FROM listings WHERE source_listing_row_id = ?",
             (source_listing_db_id,),
-        ).fetchone()[0]
+        ).fetchone()
+        return row[0] if row else None
     finally:
         if should_close:
             conn.close()
@@ -688,7 +896,7 @@ def resolve_canonical_listing_and_vehicle(snapshot, *, dry_run=False, conn=None)
         if listing_row is None:
             conn.execute(
                 """
-                INSERT INTO listings (
+                INSERT OR IGNORE INTO listings (
                     source_id,
                     source_listing_id,
                     source_listing_row_id,
@@ -1341,6 +1549,15 @@ def init_database(conn):
         vehicle_id INTEGER,
         canonical_url TEXT DEFAULT '',
         status TEXT DEFAULT 'active',
+        current_price INTEGER,
+        current_mileage INTEGER,
+        current_description TEXT,
+        current_seller TEXT,
+        current_url TEXT,
+        current_options TEXT,
+        availability TEXT DEFAULT 'UNKNOWN',
+        latest_source_snapshot_id INTEGER,
+        current_state_updated_at TEXT,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP,
         updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
         UNIQUE(source_listing_row_id),
@@ -1349,6 +1566,19 @@ def init_database(conn):
         FOREIGN KEY (vehicle_id) REFERENCES vehicles(id)
     )
     """)
+
+    for column, definition in [
+        ("current_price", "INTEGER"),
+        ("current_mileage", "INTEGER"),
+        ("current_description", "TEXT"),
+        ("current_seller", "TEXT"),
+        ("current_url", "TEXT"),
+        ("current_options", "TEXT"),
+        ("availability", "TEXT DEFAULT 'UNKNOWN'"),
+        ("latest_source_snapshot_id", "INTEGER"),
+        ("current_state_updated_at", "TEXT"),
+    ]:
+        ensure_column(conn, "listings", column, definition)
 
     conn.execute("""
     CREATE TABLE IF NOT EXISTS listing_vehicle_mappings (
