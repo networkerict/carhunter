@@ -22,6 +22,7 @@ from sources import (
     SourceIngestionResult,
     SourceIngestionService,
     SourceListingDetail,
+    SourceSnapshot,
 )
 from sources.base import SourceUnavailableError
 from sources.registry import SourceRegistry
@@ -265,6 +266,284 @@ class TestSourceIngestionService(unittest.TestCase):
         adapter.fetch_listing_detail.assert_called_once_with(listing_one, mock.ANY)
         save_car.assert_not_called()
         mark_missing_cars_sold.assert_not_called()
+
+    def test_canonical_source_snapshot_persistence_preserves_identity_and_provenance(self):
+        db_path = os.path.join(self.tempdir.name, "canonical.db")
+        config.DATABASE = db_path
+        database.get_connection().close()
+
+        snapshot = SourceSnapshot(
+            source_name="autoscout24",
+            source_listing_id="listing-123",
+            source_url="https://www.autoscout24.de/angebote/listing-123",
+            discovered_at=datetime.now(),
+            fetched_at=datetime.now(),
+            raw_summary_payload={"id": "listing-123", "title": "Audi A5"},
+            raw_detail_payload={"description": "Nice car"},
+            extracted_fields={"fingerprint": "fp-123", "price": 25000},
+            field_provenance={
+                "fingerprint": {"source_name": "autoscout24", "source_listing_id": "listing-123", "stage": "summary"},
+                "price": {"source_name": "autoscout24", "source_listing_id": "listing-123", "stage": "summary"},
+            },
+        )
+
+        row_id = database.save_source_snapshot(snapshot)
+        self.assertIsNotNone(row_id)
+
+        conn = database.get_connection()
+        try:
+            source_row = conn.execute("SELECT id, source_name FROM sources WHERE source_name = ?", ("autoscout24",)).fetchone()
+            self.assertIsNotNone(source_row)
+
+            listing_row = conn.execute(
+                "SELECT source_id, source_listing_id, source_url FROM source_listings WHERE source_id = ? AND source_listing_id = ?",
+                (source_row[0], "listing-123"),
+            ).fetchone()
+            self.assertIsNotNone(listing_row)
+            self.assertEqual(listing_row[2], snapshot.source_url)
+
+            snapshot_row = conn.execute(
+                "SELECT id, source_id, source_listing_id, snapshot_hash, field_provenance FROM source_snapshots WHERE source_id = ? AND source_listing_id = ?",
+                (source_row[0], "listing-123"),
+            ).fetchone()
+            self.assertIsNotNone(snapshot_row)
+            self.assertIn("autoscout24", snapshot_row[4])
+
+            provenance_row = conn.execute(
+                "SELECT source_name, source_listing_id, field_provenance FROM source_provenance WHERE source_snapshot_id = ?",
+                (snapshot_row[0],),
+            ).fetchone()
+            self.assertIsNotNone(provenance_row)
+            self.assertEqual(provenance_row[0], "autoscout24")
+            self.assertEqual(provenance_row[1], "listing-123")
+        finally:
+            conn.close()
+
+    def test_canonical_snapshot_persistence_is_idempotent_per_source_listing(self):
+        db_path = os.path.join(self.tempdir.name, "canonical-idempotent.db")
+        config.DATABASE = db_path
+        database.get_connection().close()
+
+        snapshot = SourceSnapshot(
+            source_name="mobile_de",
+            source_listing_id="mobile-42",
+            source_url="https://www.mobile.de/auto-inserat/mobile-42",
+            discovered_at=datetime.now(),
+            fetched_at=datetime.now(),
+            raw_summary_payload={"mobileAdId": "mobile-42", "price": {"consumerPriceGross": 30000}},
+            raw_detail_payload={"plainTextDescription": "Nice"},
+            extracted_fields={"fingerprint": "fp-mobile-42", "price": 30000},
+            field_provenance={"price": {"source_name": "mobile_de", "source_listing_id": "mobile-42", "field": "price.consumerPriceGross"}},
+        )
+
+        first = database.save_source_snapshot(snapshot)
+        second = database.save_source_snapshot(snapshot)
+        self.assertIsNotNone(first)
+        self.assertEqual(first, second)
+
+        conn = database.get_connection()
+        try:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM source_snapshots WHERE source_listing_id = ?",
+                ("mobile-42",),
+            ).fetchone()[0]
+            self.assertEqual(count, 1)
+        finally:
+            conn.close()
+
+    def test_canonical_snapshot_dry_run_does_not_persist_records(self):
+        db_path = os.path.join(self.tempdir.name, "canonical-dry-run.db")
+        config.DATABASE = db_path
+        database.get_connection().close()
+
+        snapshot = SourceSnapshot(
+            source_name="autoscout24",
+            source_listing_id="listing-999",
+            source_url="https://www.autoscout24.de/angebote/listing-999",
+            discovered_at=datetime.now(),
+            fetched_at=datetime.now(),
+            raw_summary_payload={"id": "listing-999"},
+            raw_detail_payload={"description": "dry"},
+            extracted_fields={"fingerprint": "fp-999", "price": 15000},
+            field_provenance={"price": {"source_name": "autoscout24", "source_listing_id": "listing-999"}},
+        )
+
+        self.assertIsNone(database.save_source_snapshot(snapshot, dry_run=True))
+        self.assertEqual(database.persist_source_snapshots([snapshot], dry_run=True), [])
+
+        conn = database.get_connection()
+        try:
+            source_count = conn.execute("SELECT COUNT(*) FROM sources").fetchone()[0]
+            snapshot_count = conn.execute("SELECT COUNT(*) FROM source_snapshots").fetchone()[0]
+            provenance_count = conn.execute("SELECT COUNT(*) FROM source_provenance").fetchone()[0]
+            self.assertEqual(source_count, 0)
+            self.assertEqual(snapshot_count, 0)
+            self.assertEqual(provenance_count, 0)
+        finally:
+            conn.close()
+
+    def test_same_semantic_snapshot_is_idempotent_across_timestamps(self):
+        db_path = os.path.join(self.tempdir.name, "semantic-idempotent.db")
+        config.DATABASE = db_path
+        database.get_connection().close()
+
+        first = SourceSnapshot(
+            source_name="autoscout24",
+            source_listing_id="listing-202",
+            source_url="https://www.autoscout24.de/angebote/listing-202",
+            discovered_at=datetime(2025, 1, 1, 12, 0, 0),
+            fetched_at=datetime(2025, 1, 1, 12, 1, 0),
+            raw_summary_payload={"id": "listing-202", "price": 25000},
+            raw_detail_payload={"description": "Same description"},
+            extracted_fields={"fingerprint": "fp-202", "price": 25000, "description": "Same description"},
+            field_provenance={"price": {"source_name": "autoscout24", "source_listing_id": "listing-202"}},
+        )
+        second = SourceSnapshot(
+            source_name="autoscout24",
+            source_listing_id="listing-202",
+            source_url="https://www.autoscout24.de/angebote/listing-202",
+            discovered_at=datetime(2025, 1, 2, 12, 0, 0),
+            fetched_at=datetime(2025, 1, 2, 12, 5, 0),
+            raw_summary_payload={"id": "listing-202", "price": 25000},
+            raw_detail_payload={"description": "Same description"},
+            extracted_fields={"fingerprint": "fp-202", "price": 25000, "description": "Same description"},
+            field_provenance={"price": {"source_name": "autoscout24", "source_listing_id": "listing-202"}},
+        )
+
+        persisted = database.persist_source_snapshots([first, second])
+        self.assertEqual(len(persisted), 1)
+
+        conn = database.get_connection()
+        try:
+            count = conn.execute("SELECT COUNT(*) FROM source_snapshots WHERE source_listing_id = ?", ("listing-202",)).fetchone()[0]
+            self.assertEqual(count, 1)
+        finally:
+            conn.close()
+
+    def test_url_change_does_not_create_new_semantic_observation(self):
+        db_path = os.path.join(self.tempdir.name, "semantic-url-idempotent.db")
+        config.DATABASE = db_path
+        database.get_connection().close()
+
+        first = SourceSnapshot(
+            source_name="autoscout24",
+            source_listing_id="listing-777",
+            source_url="https://www.autoscout24.de/angebote/listing-777-v1",
+            discovered_at=datetime(2025, 1, 1, 12, 0, 0),
+            fetched_at=datetime(2025, 1, 1, 12, 1, 0),
+            raw_summary_payload={"id": "listing-777", "price": 18000},
+            raw_detail_payload={"description": "Same description"},
+            extracted_fields={"fingerprint": "fp-777", "price": 18000, "description": "Same description"},
+            field_provenance={"price": {"source_name": "autoscout24", "source_listing_id": "listing-777"}},
+        )
+        second = SourceSnapshot(
+            source_name="autoscout24",
+            source_listing_id="listing-777",
+            source_url="https://www.autoscout24.de/angebote/listing-777-v2",
+            discovered_at=datetime(2025, 1, 2, 12, 0, 0),
+            fetched_at=datetime(2025, 1, 2, 12, 5, 0),
+            raw_summary_payload={"id": "listing-777", "price": 18000},
+            raw_detail_payload={"description": "Same description"},
+            extracted_fields={"fingerprint": "fp-777", "price": 18000, "description": "Same description"},
+            field_provenance={"price": {"source_name": "autoscout24", "source_listing_id": "listing-777"}},
+        )
+
+        persisted = database.persist_source_snapshots([first, second])
+        self.assertEqual(len(persisted), 1)
+
+        conn = database.get_connection()
+        try:
+            count = conn.execute("SELECT COUNT(*) FROM source_snapshots WHERE source_listing_id = ?", ("listing-777",)).fetchone()[0]
+            self.assertEqual(count, 1)
+        finally:
+            conn.close()
+
+    def test_semantic_change_creates_new_observation(self):
+        db_path = os.path.join(self.tempdir.name, "semantic-change.db")
+        config.DATABASE = db_path
+        database.get_connection().close()
+
+        original = SourceSnapshot(
+            source_name="mobile_de",
+            source_listing_id="mobile-333",
+            source_url="https://www.mobile.de/auto-inserat/mobile-333",
+            discovered_at=datetime(2025, 1, 1),
+            fetched_at=datetime(2025, 1, 1, 1, 0),
+            raw_summary_payload={"mobileAdId": "mobile-333", "price": {"consumerPriceGross": 25000}},
+            raw_detail_payload={"description": "Old"},
+            extracted_fields={"price": 25000, "description": "Old"},
+            field_provenance={"price": {"source_name": "mobile_de", "source_listing_id": "mobile-333"}},
+        )
+        changed = SourceSnapshot(
+            source_name="mobile_de",
+            source_listing_id="mobile-333",
+            source_url="https://www.mobile.de/auto-inserat/mobile-333",
+            discovered_at=datetime(2025, 1, 2),
+            fetched_at=datetime(2025, 1, 2, 1, 0),
+            raw_summary_payload={"mobileAdId": "mobile-333", "price": {"consumerPriceGross": 26000}},
+            raw_detail_payload={"description": "New"},
+            extracted_fields={"price": 26000, "description": "New"},
+            field_provenance={"price": {"source_name": "mobile_de", "source_listing_id": "mobile-333"}},
+        )
+
+        persisted = database.persist_source_snapshots([original, changed])
+        self.assertEqual(len(persisted), 2)
+
+        conn = database.get_connection()
+        try:
+            count = conn.execute("SELECT COUNT(*) FROM source_snapshots WHERE source_listing_id = ?", ("mobile-333",)).fetchone()[0]
+            self.assertEqual(count, 2)
+        finally:
+            conn.close()
+
+    def test_batch_persistence_rolls_back_on_failure(self):
+        db_path = os.path.join(self.tempdir.name, "batch-atomic.db")
+        config.DATABASE = db_path
+        database.get_connection().close()
+
+        first = SourceSnapshot(
+            source_name="autoscout24",
+            source_listing_id="batch-1",
+            source_url="https://www.autoscout24.de/angebote/batch-1",
+            discovered_at=datetime.now(),
+            fetched_at=datetime.now(),
+            raw_summary_payload={"id": "batch-1"},
+            raw_detail_payload={"description": "ok"},
+            extracted_fields={"fingerprint": "fp-batch-1", "price": 20000},
+            field_provenance={"price": {"source_name": "autoscout24", "source_listing_id": "batch-1"}},
+        )
+        second = SourceSnapshot(
+            source_name="autoscout24",
+            source_listing_id="batch-2",
+            source_url="https://www.autoscout24.de/angebote/batch-2",
+            discovered_at=datetime.now(),
+            fetched_at=datetime.now(),
+            raw_summary_payload={"id": "batch-2"},
+            raw_detail_payload={"description": "fail"},
+            extracted_fields={"fingerprint": "fp-batch-2", "price": 30000},
+            field_provenance={"price": {"source_name": "autoscout24", "source_listing_id": "batch-2"}},
+        )
+
+        original_json = database._canonical_json
+
+        def fake_json(value):
+            if value and isinstance(value, dict) and value.get("source_listing_id") == "batch-2":
+                raise TypeError("simulated batch failure")
+            return original_json(value)
+
+        try:
+            with mock.patch("database._canonical_json", side_effect=fake_json):
+                with self.assertRaises(TypeError):
+                    database.persist_source_snapshots([first, second])
+        finally:
+            pass
+
+        conn = database.get_connection()
+        try:
+            count = conn.execute("SELECT COUNT(*) FROM source_snapshots").fetchone()[0]
+            self.assertEqual(count, 0)
+        finally:
+            conn.close()
 
     def test_compatibility_boundary_preserves_existing_scrape_behavior(self):
         old_db = os.path.join(self.tempdir.name, "old.db")
