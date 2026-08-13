@@ -384,6 +384,8 @@ def save_source_snapshot(snapshot, *, dry_run=False, conn=None):
         ).fetchone()
 
         if existing_snapshot is not None:
+            if should_close:
+                conn.commit()
             return existing_snapshot[0]
 
         conn.execute(

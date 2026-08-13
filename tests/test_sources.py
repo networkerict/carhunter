@@ -420,6 +420,58 @@ class TestSourceIngestionService(unittest.TestCase):
         finally:
             conn.close()
 
+    def test_duplicate_snapshot_commits_listing_updates_when_connection_is_owned(self):
+        db_path = os.path.join(self.tempdir.name, "duplicate-listing-update.db")
+        config.DATABASE = db_path
+        database.get_connection().close()
+
+        initial = SourceSnapshot(
+            source_name="autoscout24",
+            source_listing_id="listing-duplicate-1",
+            source_url="https://www.autoscout24.de/angebote/listing-duplicate-1-old",
+            discovered_at=datetime(2025, 1, 1, 12, 0, 0),
+            fetched_at=datetime(2025, 1, 1, 12, 1, 0),
+            raw_summary_payload={"id": "listing-duplicate-1", "price": 17000},
+            raw_detail_payload={"description": "Original"},
+            extracted_fields={"fingerprint": "fp-duplicate-1", "price": 17000, "description": "Original"},
+            field_provenance={"price": {"source_name": "autoscout24", "source_listing_id": "listing-duplicate-1"}},
+        )
+        duplicate = SourceSnapshot(
+            source_name="autoscout24",
+            source_listing_id="listing-duplicate-1",
+            source_url="https://www.autoscout24.de/angebote/listing-duplicate-1-new",
+            discovered_at=datetime(2025, 1, 2, 12, 0, 0),
+            fetched_at=datetime(2025, 1, 2, 12, 5, 0),
+            raw_summary_payload={"id": "listing-duplicate-1", "price": 17000},
+            raw_detail_payload={"description": "Original"},
+            extracted_fields={"fingerprint": "fp-duplicate-1", "price": 17000, "description": "Original"},
+            field_provenance={"price": {"source_name": "autoscout24", "source_listing_id": "listing-duplicate-1"}},
+        )
+
+        first_id = database.save_source_snapshot(initial)
+        second_id = database.save_source_snapshot(duplicate)
+
+        self.assertEqual(first_id, second_id)
+        self.assertEqual(first_id, 1)
+
+        conn = database.get_connection()
+        try:
+            listing_row = conn.execute(
+                "SELECT source_url, status FROM source_listings WHERE source_id = ? AND source_listing_id = ?",
+                (1, "listing-duplicate-1"),
+            ).fetchone()
+            self.assertIsNotNone(listing_row)
+            self.assertEqual(listing_row[0], "https://www.autoscout24.de/angebote/listing-duplicate-1-new")
+            self.assertEqual(listing_row[1], "active")
+
+            snapshot_count = conn.execute(
+                "SELECT COUNT(*) FROM source_snapshots WHERE source_listing_id = ?",
+                ("listing-duplicate-1",),
+            ).fetchone()[0]
+            self.assertEqual(snapshot_count, 1)
+        finally:
+            conn.close()
+
     def test_url_change_does_not_create_new_semantic_observation(self):
         db_path = os.path.join(self.tempdir.name, "semantic-url-idempotent.db")
         config.DATABASE = db_path
