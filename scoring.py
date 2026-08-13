@@ -16,13 +16,11 @@ import watchlist
 
 def calculate_car_score(car, explain=False):
 
-    text = " ".join(
-        [
-            str(getattr(car, "title", "")),
-            str(getattr(car, "description", "")),
-            str(getattr(car, "options_found", "")),
-        ]
-    ).lower()
+    title = str(getattr(car, "title", "") or "").lower()
+    description = str(getattr(car, "description", "") or "").lower()
+
+    supported_variants = ("45 tfsi", "40 tfsi", "40 tdi")
+    text = title if any(variant in title for variant in supported_variants) else description
 
 
     score = 0
@@ -70,12 +68,12 @@ def calculate_car_score(car, explain=False):
             pass
 
 
-    km = car.km or 0
+    km = car.km
 
-    if km < 20000:
+    if km not in (None, 0) and km < 20000:
         add(10, "<20.000 km")
 
-    elif km < 40000:
+    elif km not in (None, 0) and km < 40000:
         add(5, "<40.000 km")
 
 
@@ -136,10 +134,10 @@ def calculate_value_score(car, explain=False):
         add(5, "Prijs < €50.000")
 
 
-    if km < 30000:
+    if km not in (None, 0) and km < 30000:
         add(15, "<30.000 km")
 
-    elif km < 50000:
+    elif km not in (None, 0) and km < 50000:
         add(10, "<50.000 km")
 
 
