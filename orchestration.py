@@ -263,6 +263,15 @@ def stage_scrape(context):
             f"({result.duration:.2f}s)"
         )
 
+    # Persist canonical source/listing provenance before the legacy compatibility
+    # projection writes to the cars table. This preserves source identity while
+    # leaving the existing cars-based downstream pipeline unchanged.
+    canonical_persisted = database.persist_source_snapshots(
+        execution_result.all_snapshots,
+        dry_run=context.dry_run,
+    )
+    context.stage_results["canonical_snapshots_persisted"] = len(canonical_persisted)
+
     # All snapshots are now in execution_result.all_snapshots
     # NO DUPLICATE INGESTION - use result directly
     compatibility_result = apply_compatibility_inventory_updates(

@@ -3,6 +3,8 @@ AutoHunter v2.4
 Database module
 """
 
+import hashlib
+import json
 import sqlite3
 import os
 
@@ -262,6 +264,236 @@ def update_car_scores(
     if own_connection:
         conn.commit()
         conn.close()
+def _canonical_json(value):
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+
+
+def _hashable_value(value):
+    if isinstance(value, dict):
+        return {str(key): _hashable_value(val) for key, val in sorted(value.items(), key=lambda item: str(item[0]))}
+    if isinstance(value, list):
+        return [_hashable_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [_hashable_value(item) for item in value]
+    if isinstance(value, set):
+        return sorted(_hashable_value(item) for item in value)
+    if value is None:
+        return None
+    return value
+
+
+def _semantic_observation_payload(snapshot):
+    extracted_fields = dict(getattr(snapshot, "extracted_fields", {}) or {})
+    payload = {
+        "source_name": getattr(snapshot, "source_name", ""),
+        "source_listing_id": getattr(snapshot, "source_listing_id", ""),
+        "extracted_fields": _hashable_value(extracted_fields),
+    }
+    return _hashable_value(payload)
+
+
+def _snapshot_hash(snapshot):
+    semantic_payload = _semantic_observation_payload(snapshot)
+    return hashlib.sha256(
+        _canonical_json(semantic_payload).encode("utf-8")
+    ).hexdigest()
+
+
+def save_source_snapshot(snapshot, *, dry_run=False, conn=None):
+    """Persist a SourceSnapshot in the canonical source-listing tables.
+
+    This is intentionally narrow: it creates the canonical source/listing and
+    provenance record needed to retain SourceSnapshot identity and provenance
+    before the compatibility projection writes to the legacy cars table.
+    """
+    if dry_run:
+        return None
+
+    if snapshot is None or not hasattr(snapshot, "source_name"):
+        return None
+
+    should_close = conn is None
+    conn = conn or get_connection()
+    try:
+        source_name = str(getattr(snapshot, "source_name", "unknown") or "unknown").strip()
+        source_listing_id = str(getattr(snapshot, "source_listing_id", "") or "")
+        source_url = str(getattr(snapshot, "source_url", "") or "")
+        source_row = conn.execute(
+            "SELECT id FROM sources WHERE source_name = ?",
+            (source_name,),
+        ).fetchone()
+
+        if source_row is None:
+            conn.execute(
+                """
+                INSERT INTO sources (source_name, display_name, source_url, created_at)
+                VALUES (?, ?, ?, datetime('now'))
+                """,
+                (source_name, source_name, source_url),
+            )
+            source_id = conn.execute(
+                "SELECT id FROM sources WHERE source_name = ?",
+                (source_name,),
+            ).fetchone()[0]
+        else:
+            source_id = source_row[0]
+
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO source_listings (
+                source_id,
+                source_listing_id,
+                source_url,
+                first_seen,
+                last_seen,
+                status
+            ) VALUES (?, ?, ?, datetime('now'), datetime('now'), 'active')
+            """,
+            (source_id, source_listing_id, source_url),
+        )
+
+        listing_row = conn.execute(
+            "SELECT id FROM source_listings WHERE source_id = ? AND source_listing_id = ?",
+            (source_id, source_listing_id),
+        ).fetchone()
+        listing_id = listing_row[0]
+
+        conn.execute(
+            """
+            UPDATE source_listings
+            SET source_url = ?, last_seen = datetime('now'), status = 'active'
+            WHERE id = ?
+            """,
+            (source_url, listing_id),
+        )
+
+        snapshot_hash = _snapshot_hash(snapshot)
+        existing_snapshot = conn.execute(
+            """
+            SELECT id FROM source_snapshots
+            WHERE source_id = ? AND source_listing_id = ? AND snapshot_hash = ?
+            ORDER BY id DESC LIMIT 1
+            """,
+            (source_id, source_listing_id, snapshot_hash),
+        ).fetchone()
+
+        if existing_snapshot is not None:
+            if should_close:
+                conn.commit()
+            return existing_snapshot[0]
+
+        conn.execute(
+            """
+            INSERT INTO source_snapshots (
+                source_id,
+                source_listing_id,
+                source_url,
+                discovered_at,
+                fetched_at,
+                snapshot_hash,
+                raw_summary_payload,
+                raw_detail_payload,
+                extracted_fields,
+                field_provenance,
+                created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+            """,
+            (
+                source_id,
+                source_listing_id,
+                source_url,
+                getattr(snapshot, "discovered_at", None).isoformat() if getattr(snapshot, "discovered_at", None) else None,
+                getattr(snapshot, "fetched_at", None).isoformat() if getattr(snapshot, "fetched_at", None) else None,
+                snapshot_hash,
+                _canonical_json(dict(getattr(snapshot, "raw_summary_payload", {}) or {})),
+                _canonical_json(dict(getattr(snapshot, "raw_detail_payload", {}) or {})) if getattr(snapshot, "raw_detail_payload", None) is not None else None,
+                _canonical_json(dict(getattr(snapshot, "extracted_fields", {}) or {})),
+                _canonical_json(dict(getattr(snapshot, "field_provenance", {}) or {})),
+            ),
+        )
+
+        snapshot_row = conn.execute(
+            "SELECT id FROM source_snapshots WHERE source_id = ? AND source_listing_id = ? AND snapshot_hash = ? ORDER BY id DESC LIMIT 1",
+            (source_id, source_listing_id, snapshot_hash),
+        ).fetchone()
+        snapshot_row_id = snapshot_row[0]
+
+        conn.execute(
+            """
+            INSERT INTO source_provenance (
+                source_snapshot_id,
+                source_id,
+                source_listing_id,
+                source_url,
+                source_name,
+                retrieval_timestamp,
+                field_provenance,
+                mapping_version,
+                mapping_decision,
+                canonical_target,
+                created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+            """,
+            (
+                snapshot_row_id,
+                source_id,
+                source_listing_id,
+                source_url,
+                source_name,
+                getattr(snapshot, "fetched_at", None).isoformat() if getattr(snapshot, "fetched_at", None) else (getattr(snapshot, "discovered_at", None).isoformat() if getattr(snapshot, "discovered_at", None) else None),
+                _canonical_json(dict(getattr(snapshot, "field_provenance", {}) or {})),
+                "arch-007-foundation",
+                "persisted_snapshot",
+                "source_snapshot",
+            ),
+        )
+
+        if should_close:
+            conn.commit()
+        return snapshot_row_id
+    finally:
+        if should_close:
+            conn.close()
+
+
+def persist_source_snapshots(snapshots, *, dry_run=False):
+    """Persist a batch of SourceSnapshots in canonical storage.
+
+    The batch is committed as one transaction so a later failure rolls back
+    earlier canonical writes in the same batch.
+    """
+    if dry_run:
+        return []
+
+    snapshot_list = list(snapshots or [])
+    if not snapshot_list:
+        return []
+
+    conn = get_connection()
+    try:
+        conn.execute("BEGIN")
+        persisted = []
+        seen = set()
+        for snapshot in snapshot_list:
+            row_id = save_source_snapshot(snapshot, dry_run=False, conn=conn)
+            if row_id is not None and row_id not in seen:
+                persisted.append(row_id)
+                seen.add(row_id)
+        conn.commit()
+        return persisted
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def save_car(car):
 
     conn = None
@@ -546,6 +778,65 @@ def ensure_column(conn, table, column, definition):
 
 
 def init_database(conn):
+
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS sources (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source_name TEXT NOT NULL UNIQUE,
+        display_name TEXT DEFAULT '',
+        source_url TEXT DEFAULT '',
+        source_type TEXT DEFAULT 'marketplace',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS source_listings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source_id INTEGER NOT NULL,
+        source_listing_id TEXT NOT NULL,
+        source_url TEXT DEFAULT '',
+        first_seen TEXT DEFAULT CURRENT_TIMESTAMP,
+        last_seen TEXT DEFAULT CURRENT_TIMESTAMP,
+        status TEXT DEFAULT 'active',
+        UNIQUE(source_id, source_listing_id)
+    )
+    """)
+
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS source_snapshots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source_id INTEGER NOT NULL,
+        source_listing_id TEXT NOT NULL,
+        source_url TEXT DEFAULT '',
+        discovered_at TEXT,
+        fetched_at TEXT,
+        snapshot_hash TEXT NOT NULL,
+        raw_summary_payload TEXT,
+        raw_detail_payload TEXT,
+        extracted_fields TEXT,
+        field_provenance TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(source_id, source_listing_id, snapshot_hash)
+    )
+    """)
+
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS source_provenance (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source_snapshot_id INTEGER NOT NULL,
+        source_id INTEGER NOT NULL,
+        source_listing_id TEXT NOT NULL,
+        source_url TEXT DEFAULT '',
+        source_name TEXT NOT NULL,
+        retrieval_timestamp TEXT,
+        field_provenance TEXT,
+        mapping_version TEXT DEFAULT 'arch-007-foundation',
+        mapping_decision TEXT DEFAULT 'persisted_snapshot',
+        canonical_target TEXT DEFAULT 'source_snapshot',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
 
     conn.execute("""
     CREATE TABLE IF NOT EXISTS cars (
