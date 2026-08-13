@@ -272,6 +272,12 @@ def stage_scrape(context):
     )
     context.stage_results["canonical_snapshots_persisted"] = len(canonical_persisted)
 
+    mapping_results = database.resolve_canonical_vehicle_links(
+        execution_result.all_snapshots,
+        dry_run=context.dry_run,
+    )
+    context.stage_results["canonical_vehicle_mappings"] = len(mapping_results)
+
     # All snapshots are now in execution_result.all_snapshots
     # NO DUPLICATE INGESTION - use result directly
     compatibility_result = apply_compatibility_inventory_updates(

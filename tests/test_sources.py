@@ -510,6 +510,287 @@ class TestSourceIngestionService(unittest.TestCase):
         finally:
             conn.close()
 
+    def test_same_vin_across_sources_resolves_to_one_vehicle(self):
+        db_path = os.path.join(self.tempdir.name, "canonical-vehicle-vin.db")
+        config.DATABASE = db_path
+        database.get_connection().close()
+
+        autoscout = SourceSnapshot(
+            source_name="autoscout24",
+            source_listing_id="as-100",
+            source_url="https://www.autoscout24.de/angebote/as-100",
+            discovered_at=datetime(2025, 1, 1),
+            fetched_at=datetime(2025, 1, 1, 1, 0),
+            raw_summary_payload={"id": "as-100", "vin": "WAU1234567890"},
+            raw_detail_payload={"description": "Audi A5"},
+            extracted_fields={"vin": "WAU1234567890", "make": "Audi", "model": "A5", "year": 2023, "body_type": "cabriolet"},
+            field_provenance={"vin": {"source_name": "autoscout24", "source_listing_id": "as-100"}},
+        )
+        mobile = SourceSnapshot(
+            source_name="mobile_de",
+            source_listing_id="mob-500",
+            source_url="https://www.mobile.de/auto-inserat/mob-500",
+            discovered_at=datetime(2025, 1, 2),
+            fetched_at=datetime(2025, 1, 2, 1, 0),
+            raw_summary_payload={"mobileAdId": "mob-500", "vin": "WAU1234567890"},
+            raw_detail_payload={"description": "Same car"},
+            extracted_fields={"vin": "WAU1234567890", "make": "Audi", "model": "A5", "year": 2023, "body_type": "cabriolet"},
+            field_provenance={"vin": {"source_name": "mobile_de", "source_listing_id": "mob-500"}},
+        )
+
+        database.persist_source_snapshots([autoscout, mobile])
+        result = database.resolve_canonical_vehicle_links([autoscout, mobile])
+        self.assertEqual(len(result), 2)
+
+        conn = database.get_connection()
+        try:
+            vehicle_count = conn.execute("SELECT COUNT(*) FROM vehicles").fetchone()[0]
+            listing_count = conn.execute("SELECT COUNT(*) FROM listings").fetchone()[0]
+            linked_vehicle_ids = {
+                row[0] for row in conn.execute("SELECT vehicle_id FROM listings").fetchall()
+                if row[0] is not None
+            }
+            self.assertEqual(vehicle_count, 1)
+            self.assertEqual(listing_count, 2)
+            self.assertEqual(len(linked_vehicle_ids), 1)
+        finally:
+            conn.close()
+
+    def test_linked_vehicle_same_vin_keeps_existing_vehicle(self):
+        db_path = os.path.join(self.tempdir.name, "canonical-linked-same-vin.db")
+        config.DATABASE = db_path
+        database.get_connection().close()
+
+        snapshot = SourceSnapshot(
+            source_name="autoscout24",
+            source_listing_id="as-410",
+            source_url="https://www.autoscout24.de/angebote/as-410",
+            discovered_at=datetime(2025, 1, 1),
+            fetched_at=datetime(2025, 1, 1, 1, 0),
+            raw_summary_payload={"id": "as-410", "vin": "WAU1111111111"},
+            raw_detail_payload={"description": "Audi A5"},
+            extracted_fields={"vin": "WAU1111111111", "make": "Audi", "model": "A5", "year": 2023},
+            field_provenance={"vin": {"source_name": "autoscout24", "source_listing_id": "as-410"}},
+        )
+        database.save_source_snapshot(snapshot)
+
+        conn = database.get_connection()
+        try:
+            source_row = conn.execute("SELECT id FROM sources WHERE source_name = ?", ("autoscout24",)).fetchone()
+            source_listing_row = conn.execute(
+                "SELECT id FROM source_listings WHERE source_id = ? AND source_listing_id = ?",
+                (source_row[0], "as-410"),
+            ).fetchone()
+            conn.execute(
+                "INSERT INTO vehicles (vin, make, model, status) VALUES (?, 'Audi', 'A5', 'active')",
+                ("WAU1111111111",),
+            )
+            vehicle_id = conn.execute("SELECT id FROM vehicles WHERE vin = ?", ("WAU1111111111",)).fetchone()[0]
+            conn.execute(
+                "INSERT INTO listings (source_id, source_listing_id, source_listing_row_id, vehicle_id, status) VALUES (?, ?, ?, ?, 'linked')",
+                (source_row[0], "as-410", source_listing_row[0], vehicle_id),
+            )
+            listing_id = conn.execute("SELECT id FROM listings WHERE source_listing_row_id = ?", (source_listing_row[0],)).fetchone()[0]
+
+            outcome_listing_id, outcome_vehicle_id, outcome = database.resolve_canonical_listing_and_vehicle(snapshot, conn=conn)
+            provenance = conn.execute(
+                "SELECT outcome, review_required FROM listing_vehicle_mappings WHERE listing_id = ? ORDER BY id DESC LIMIT 1",
+                (listing_id,),
+            ).fetchone()
+            self.assertEqual(outcome_listing_id, listing_id)
+            self.assertEqual(outcome_vehicle_id, vehicle_id)
+            self.assertEqual(outcome, "EXISTING_LISTING")
+            self.assertEqual(provenance[0], "EXISTING_LISTING")
+            self.assertEqual(provenance[1], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM vehicles WHERE vin = ?", ("WAU1111111111",)).fetchone()[0], 1)
+        finally:
+            conn.close()
+
+    def test_linked_vehicle_conflicting_vin_requires_operator_review(self):
+        db_path = os.path.join(self.tempdir.name, "canonical-linked-conflict.db")
+        config.DATABASE = db_path
+        database.get_connection().close()
+
+        snapshot = SourceSnapshot(
+            source_name="autoscout24",
+            source_listing_id="as-420",
+            source_url="https://www.autoscout24.de/angebote/as-420",
+            discovered_at=datetime(2025, 1, 1),
+            fetched_at=datetime(2025, 1, 1, 1, 0),
+            raw_summary_payload={"id": "as-420", "vin": "WAU2222222222"},
+            raw_detail_payload={"description": "Audi A5"},
+            extracted_fields={"vin": "WAU2222222222", "make": "Audi", "model": "A5", "year": 2023},
+            field_provenance={"vin": {"source_name": "autoscout24", "source_listing_id": "as-420"}},
+        )
+        database.save_source_snapshot(snapshot)
+
+        conn = database.get_connection()
+        try:
+            source_row = conn.execute("SELECT id FROM sources WHERE source_name = ?", ("autoscout24",)).fetchone()
+            source_listing_row = conn.execute(
+                "SELECT id FROM source_listings WHERE source_id = ? AND source_listing_id = ?",
+                (source_row[0], "as-420"),
+            ).fetchone()
+            conn.execute("INSERT INTO vehicles (vin, make, model, status) VALUES (?, 'Audi', 'A5', 'active')", ("WAU1111111111",))
+            vehicle_a = conn.execute("SELECT id FROM vehicles WHERE vin = ?", ("WAU1111111111",)).fetchone()[0]
+            conn.execute("INSERT INTO vehicles (vin, make, model, status) VALUES (?, 'Audi', 'A5', 'active')", ("WAU2222222222",))
+            vehicle_b = conn.execute("SELECT id FROM vehicles WHERE vin = ?", ("WAU2222222222",)).fetchone()[0]
+            conn.execute(
+                "INSERT INTO listings (source_id, source_listing_id, source_listing_row_id, vehicle_id, status) VALUES (?, ?, ?, ?, 'linked')",
+                (source_row[0], "as-420", source_listing_row[0], vehicle_a),
+            )
+            listing_id = conn.execute("SELECT id FROM listings WHERE source_listing_row_id = ?", (source_listing_row[0],)).fetchone()[0]
+
+            outcome_listing_id, outcome_vehicle_id, outcome = database.resolve_canonical_listing_and_vehicle(snapshot, conn=conn)
+            provenance = conn.execute(
+                "SELECT outcome, review_required, evidence FROM listing_vehicle_mappings WHERE listing_id = ? ORDER BY id DESC LIMIT 1",
+                (listing_id,),
+            ).fetchone()
+            self.assertEqual(outcome_listing_id, listing_id)
+            self.assertEqual(outcome_vehicle_id, vehicle_a)
+            self.assertEqual(outcome, "OPERATOR_REVIEW")
+            self.assertEqual(provenance[0], "OPERATOR_REVIEW")
+            self.assertEqual(provenance[1], 1)
+            self.assertIn("authoritative_vin_conflict", provenance[2])
+            self.assertEqual(conn.execute("SELECT vehicle_id FROM listings WHERE id = ?", (listing_id,)).fetchone()[0], vehicle_a)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM vehicles WHERE vin = ?", ("WAU2222222222",)).fetchone()[0], 1)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM vehicles WHERE id IN (?, ?)", (vehicle_a, vehicle_b)).fetchone()[0], 2)
+        finally:
+            conn.close()
+
+    def test_existing_vehicle_without_vin_can_be_enriched_by_later_vin(self):
+        db_path = os.path.join(self.tempdir.name, "canonical-null-vin-enrich.db")
+        config.DATABASE = db_path
+        database.get_connection().close()
+
+        snapshot = SourceSnapshot(
+            source_name="autoscout24",
+            source_listing_id="as-430",
+            source_url="https://www.autoscout24.de/angebote/as-430",
+            discovered_at=datetime(2025, 1, 1),
+            fetched_at=datetime(2025, 1, 1, 1, 0),
+            raw_summary_payload={"id": "as-430", "vin": "WAU3333333333"},
+            raw_detail_payload={"description": "Audi A5"},
+            extracted_fields={"vin": "WAU3333333333", "make": "Audi", "model": "A5", "year": 2023},
+            field_provenance={"vin": {"source_name": "autoscout24", "source_listing_id": "as-430"}},
+        )
+        database.save_source_snapshot(snapshot)
+
+        conn = database.get_connection()
+        try:
+            source_row = conn.execute("SELECT id FROM sources WHERE source_name = ?", ("autoscout24",)).fetchone()
+            source_listing_row = conn.execute(
+                "SELECT id FROM source_listings WHERE source_id = ? AND source_listing_id = ?",
+                (source_row[0], "as-430"),
+            ).fetchone()
+            conn.execute("INSERT INTO vehicles (vin, make, model, status) VALUES (NULL, 'Audi', 'A5', 'active')")
+            vehicle_id = conn.execute("SELECT id FROM vehicles WHERE vin IS NULL ORDER BY id DESC LIMIT 1").fetchone()[0]
+            conn.execute(
+                "INSERT INTO listings (source_id, source_listing_id, source_listing_row_id, vehicle_id, status) VALUES (?, ?, ?, ?, 'linked')",
+                (source_row[0], "as-430", source_listing_row[0], vehicle_id),
+            )
+            listing_id = conn.execute("SELECT id FROM listings WHERE source_listing_row_id = ?", (source_listing_row[0],)).fetchone()[0]
+
+            outcome_listing_id, outcome_vehicle_id, outcome = database.resolve_canonical_listing_and_vehicle(snapshot, conn=conn)
+            provenance = conn.execute(
+                "SELECT outcome, review_required FROM listing_vehicle_mappings WHERE listing_id = ? ORDER BY id DESC LIMIT 1",
+                (listing_id,),
+            ).fetchone()
+            self.assertEqual(outcome_listing_id, listing_id)
+            self.assertEqual(outcome_vehicle_id, vehicle_id)
+            self.assertEqual(outcome, "MATCHED_EXISTING_VEHICLE")
+            self.assertEqual(provenance[0], "MATCHED_EXISTING_VEHICLE")
+            self.assertEqual(provenance[1], 0)
+            self.assertEqual(conn.execute("SELECT vin FROM vehicles WHERE id = ?", (vehicle_id,)).fetchone()[0], "WAU3333333333")
+        finally:
+            conn.close()
+
+    def test_no_vin_does_not_auto_merge_vehicle_identity(self):
+        db_path = os.path.join(self.tempdir.name, "canonical-no-vin.db")
+        config.DATABASE = db_path
+        database.get_connection().close()
+
+        first = SourceSnapshot(
+            source_name="autoscout24",
+            source_listing_id="as-200",
+            source_url="https://www.autoscout24.de/angebote/as-200",
+            discovered_at=datetime(2025, 1, 1),
+            fetched_at=datetime(2025, 1, 1, 1, 0),
+            raw_summary_payload={"id": "as-200"},
+            raw_detail_payload={"description": "Audi A5"},
+            extracted_fields={"make": "Audi", "model": "A5", "year": 2023, "body_type": "cabriolet"},
+            field_provenance={"make": {"source_name": "autoscout24", "source_listing_id": "as-200"}},
+        )
+        second = SourceSnapshot(
+            source_name="mobile_de",
+            source_listing_id="mob-600",
+            source_url="https://www.mobile.de/auto-inserat/mob-600",
+            discovered_at=datetime(2025, 1, 2),
+            fetched_at=datetime(2025, 1, 2, 1, 0),
+            raw_summary_payload={"mobileAdId": "mob-600"},
+            raw_detail_payload={"description": "Audi A5"},
+            extracted_fields={"make": "Audi", "model": "A5", "year": 2023, "body_type": "cabriolet"},
+            field_provenance={"model": {"source_name": "mobile_de", "source_listing_id": "mob-600"}},
+        )
+
+        database.persist_source_snapshots([first, second])
+        database.resolve_canonical_vehicle_links([first, second])
+
+        conn = database.get_connection()
+        try:
+            vehicle_count = conn.execute("SELECT COUNT(*) FROM vehicles").fetchone()[0]
+            listing_rows = conn.execute("SELECT vehicle_id, status FROM listings ORDER BY id").fetchall()
+            self.assertEqual(vehicle_count, 0)
+            self.assertEqual(len(listing_rows), 2)
+            self.assertTrue(all(row[0] is None for row in listing_rows))
+            self.assertTrue(all(row[1] == "unresolved" for row in listing_rows))
+        finally:
+            conn.close()
+
+    def test_later_vin_resolves_existing_unresolved_listing(self):
+        db_path = os.path.join(self.tempdir.name, "canonical-later-vin.db")
+        config.DATABASE = db_path
+        database.get_connection().close()
+
+        unresolved = SourceSnapshot(
+            source_name="autoscout24",
+            source_listing_id="as-300",
+            source_url="https://www.autoscout24.de/angebote/as-300",
+            discovered_at=datetime(2025, 1, 1),
+            fetched_at=datetime(2025, 1, 1, 1, 0),
+            raw_summary_payload={"id": "as-300"},
+            raw_detail_payload={"description": "Audi A5"},
+            extracted_fields={"make": "Audi", "model": "A5", "year": 2023, "body_type": "cabriolet"},
+            field_provenance={"make": {"source_name": "autoscout24", "source_listing_id": "as-300"}},
+        )
+
+        database.persist_source_snapshots([unresolved])
+        database.resolve_canonical_vehicle_links([unresolved])
+
+        resolved = SourceSnapshot(
+            source_name="autoscout24",
+            source_listing_id="as-300",
+            source_url="https://www.autoscout24.de/angebote/as-300",
+            discovered_at=datetime(2025, 1, 2),
+            fetched_at=datetime(2025, 1, 2, 1, 0),
+            raw_summary_payload={"id": "as-300", "vin": "WAU9876543210"},
+            raw_detail_payload={"description": "Audi A5 with VIN"},
+            extracted_fields={"vin": "WAU9876543210", "make": "Audi", "model": "A5", "year": 2023},
+            field_provenance={"vin": {"source_name": "autoscout24", "source_listing_id": "as-300"}},
+        )
+
+        database.resolve_canonical_vehicle_links([resolved])
+
+        conn = database.get_connection()
+        try:
+            vehicle_count = conn.execute("SELECT COUNT(*) FROM vehicles").fetchone()[0]
+            linked_listing = conn.execute("SELECT vehicle_id, status FROM listings WHERE source_listing_id = ?", ("as-300",)).fetchone()
+            self.assertEqual(vehicle_count, 1)
+            self.assertIsNotNone(linked_listing[0])
+            self.assertEqual(linked_listing[1], "linked")
+        finally:
+            conn.close()
+
     def test_semantic_change_creates_new_observation(self):
         db_path = os.path.join(self.tempdir.name, "semantic-change.db")
         config.DATABASE = db_path
