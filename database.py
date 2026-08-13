@@ -494,6 +494,481 @@ def persist_source_snapshots(snapshots, *, dry_run=False):
         conn.close()
 
 
+def _normalize_vin(raw_value):
+    if raw_value is None:
+        return None
+    value = str(raw_value).strip().upper()
+    value = "".join(ch for ch in value if ch.isalnum())
+    return value or None
+
+
+def _extract_vehicle_field(snapshot, *field_names):
+    extracted = dict(getattr(snapshot, "extracted_fields", {}) or {})
+    raw = dict(getattr(snapshot, "raw_summary_payload", {}) or {})
+    for key in field_names:
+        if key in extracted:
+            return extracted.get(key)
+        if key in raw:
+            return raw.get(key)
+    for payload in (raw, getattr(snapshot, "raw_detail_payload", {}) or {}):
+        if isinstance(payload, dict):
+            for key in field_names:
+                if key in payload:
+                    return payload.get(key)
+    return None
+
+
+def _extract_vin(snapshot):
+    value = _extract_vehicle_field(
+        snapshot,
+        "vin",
+        "vin_number",
+        "vehicle_identification_number",
+        "registration_vin",
+        "vehicleVin",
+    )
+    return _normalize_vin(value)
+
+
+def _canonical_vehicle_payload(snapshot):
+    extracted = dict(getattr(snapshot, "extracted_fields", {}) or {})
+    normalized = {
+        "vin": _extract_vin(snapshot),
+        "make": extracted.get("make") or extracted.get("brand") or extracted.get("manufacturer"),
+        "model": extracted.get("model") or extracted.get("model_name"),
+        "generation": extracted.get("generation") or extracted.get("model_generation"),
+        "body_type": extracted.get("body_type") or extracted.get("bodyType") or extracted.get("vehicle_type"),
+        "engine_variant": extracted.get("engine") or extracted.get("engine_variant") or extracted.get("motorTypeName") or extracted.get("engine_type"),
+        "drivetrain": extracted.get("drive") or extracted.get("drive_train") or extracted.get("drivetrain"),
+        "transmission": extracted.get("transmission") or extracted.get("gearbox") or extracted.get("transmissionType"),
+        "first_registration_year": extracted.get("year") or extracted.get("first_registration_year") or extracted.get("model_year"),
+    }
+    for key, value in list(normalized.items()):
+        if value is not None and isinstance(value, str):
+            value = value.strip()
+            if not value:
+                normalized[key] = None
+            else:
+                normalized[key] = value
+    return normalized
+
+
+def _ensure_canonical_listing(snapshot, conn=None):
+    conn = conn or get_connection()
+    should_close = conn is None
+    if conn is None:
+        conn = get_connection()
+        should_close = True
+
+    try:
+        source_name = str(getattr(snapshot, "source_name", "") or "").strip()
+        source_listing_id = str(getattr(snapshot, "source_listing_id", "") or "")
+        source_row = conn.execute(
+            "SELECT id FROM sources WHERE source_name = ?",
+            (source_name,),
+        ).fetchone()
+        if source_row is None:
+            source_id = None
+        else:
+            source_id = source_row[0]
+
+        if source_id is None:
+            return None
+
+        source_listing_row = conn.execute(
+            "SELECT id FROM source_listings WHERE source_id = ? AND source_listing_id = ?",
+            (source_id, source_listing_id),
+        ).fetchone()
+        if source_listing_row is None:
+            return None
+        source_listing_db_id = source_listing_row[0]
+
+        listing_row = conn.execute(
+            "SELECT id, vehicle_id, status, canonical_url FROM listings WHERE source_listing_row_id = ?",
+            (source_listing_db_id,),
+        ).fetchone()
+        if listing_row is not None:
+            listing_id = listing_row[0]
+            conn.execute(
+                "UPDATE listings SET canonical_url = ?, updated_at = datetime('now') WHERE id = ?",
+                (str(getattr(snapshot, "source_url", "") or ""), listing_id),
+            )
+            return listing_id
+
+        conn.execute(
+            """
+            INSERT INTO listings (
+                source_id,
+                source_listing_id,
+                source_listing_row_id,
+                canonical_url,
+                status,
+                created_at,
+                updated_at
+            ) VALUES (?, ?, ?, ?, 'active', datetime('now'), datetime('now'))
+            """,
+            (source_id, source_listing_id, source_listing_db_id, str(getattr(snapshot, "source_url", "") or "")),
+        )
+        return conn.execute(
+            "SELECT id FROM listings WHERE source_listing_row_id = ?",
+            (source_listing_db_id,),
+        ).fetchone()[0]
+    finally:
+        if should_close:
+            conn.close()
+
+
+def _record_mapping_provenance(conn, *, listing_id, vehicle_id, source_snapshot_id, source_id, source_listing_id, outcome, evidence, review_required=False):
+    conn.execute(
+        """
+        INSERT INTO listing_vehicle_mappings (
+            listing_id,
+            vehicle_id,
+            source_snapshot_id,
+            source_id,
+            source_listing_id,
+            outcome,
+            evidence,
+            review_required,
+            mapping_version,
+            created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'arch-007-vehicle-mapping', datetime('now'))
+        """,
+        (
+            listing_id,
+            vehicle_id,
+            source_snapshot_id,
+            source_id,
+            source_listing_id,
+            outcome,
+            _canonical_json(dict(evidence or {})),
+            1 if review_required else 0,
+        ),
+    )
+
+
+def resolve_canonical_listing_and_vehicle(snapshot, *, dry_run=False, conn=None):
+    """Map a SourceSnapshot to canonical Listing + Vehicle records.
+
+    This is intentionally conservative: the current implementation only resolves
+    cross-source identity via a normalized VIN. No heuristic fingerprint-based
+    vehicle merging is allowed in this slice.
+    """
+    if dry_run:
+        return None, None, "PROVISIONAL_UNRESOLVED"
+
+    if snapshot is None or not hasattr(snapshot, "source_name"):
+        return None, None, "PROVISIONAL_UNRESOLVED"
+
+    should_close = conn is None
+    conn = conn or get_connection()
+    try:
+        source_name = str(getattr(snapshot, "source_name", "") or "").strip()
+        source_listing_id = str(getattr(snapshot, "source_listing_id", "") or "")
+        source_row = conn.execute(
+            "SELECT id FROM sources WHERE source_name = ?",
+            (source_name,),
+        ).fetchone()
+        if source_row is None:
+            return None, None, "PROVISIONAL_UNRESOLVED"
+        source_id = source_row[0]
+
+        source_listing_row = conn.execute(
+            "SELECT id FROM source_listings WHERE source_id = ? AND source_listing_id = ?",
+            (source_id, source_listing_id),
+        ).fetchone()
+        if source_listing_row is None:
+            return None, None, "PROVISIONAL_UNRESOLVED"
+        source_listing_db_id = source_listing_row[0]
+
+        listing_row = conn.execute(
+            "SELECT id, vehicle_id, status FROM listings WHERE source_listing_row_id = ?",
+            (source_listing_db_id,),
+        ).fetchone()
+        if listing_row is None:
+            conn.execute(
+                """
+                INSERT INTO listings (
+                    source_id,
+                    source_listing_id,
+                    source_listing_row_id,
+                    canonical_url,
+                    status,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, 'active', datetime('now'), datetime('now'))
+                """,
+                (source_id, source_listing_id, source_listing_db_id, str(getattr(snapshot, "source_url", "") or "")),
+            )
+            listing_row = conn.execute(
+                "SELECT id, vehicle_id, status FROM listings WHERE source_listing_row_id = ?",
+                (source_listing_db_id,),
+            ).fetchone()
+
+        listing_id = listing_row[0]
+        current_vehicle_id = listing_row[1]
+        source_snapshot_row = conn.execute(
+            "SELECT id FROM source_snapshots WHERE source_id = ? AND source_listing_id = ? AND snapshot_hash = ? ORDER BY id DESC LIMIT 1",
+            (source_id, source_listing_id, _snapshot_hash(snapshot)),
+        ).fetchone()
+        source_snapshot_id = source_snapshot_row[0] if source_snapshot_row else None
+
+        if current_vehicle_id is not None:
+            current_vehicle_row = conn.execute(
+                "SELECT id, vin FROM vehicles WHERE id = ?",
+                (current_vehicle_id,),
+            ).fetchone()
+            current_vin = current_vehicle_row[1] if current_vehicle_row else None
+            vin = _extract_vin(snapshot)
+
+            if not vin:
+                _record_mapping_provenance(
+                    conn,
+                    listing_id=listing_id,
+                    vehicle_id=current_vehicle_id,
+                    source_snapshot_id=source_snapshot_id,
+                    source_id=source_id,
+                    source_listing_id=source_listing_id,
+                    outcome="EXISTING_LISTING",
+                    evidence={
+                        "source_name": source_name,
+                        "source_listing_id": source_listing_id,
+                        "current_vehicle_id": current_vehicle_id,
+                        "current_vin": current_vin,
+                        "incoming_vin": None,
+                    },
+                    review_required=False,
+                )
+                return listing_id, current_vehicle_id, "EXISTING_LISTING"
+
+            if current_vin is None:
+                conflicting_vehicle = conn.execute(
+                    "SELECT id, vin FROM vehicles WHERE vin = ? AND id != ?",
+                    (vin, current_vehicle_id),
+                ).fetchone()
+                if conflicting_vehicle is not None:
+                    _record_mapping_provenance(
+                        conn,
+                        listing_id=listing_id,
+                        vehicle_id=current_vehicle_id,
+                        source_snapshot_id=source_snapshot_id,
+                        source_id=source_id,
+                        source_listing_id=source_listing_id,
+                        outcome="OPERATOR_REVIEW",
+                        evidence={
+                            "source_name": source_name,
+                            "source_listing_id": source_listing_id,
+                            "current_vehicle_id": current_vehicle_id,
+                            "current_vin": current_vin,
+                            "incoming_vin": vin,
+                            "conflicting_vehicle_id": conflicting_vehicle[0],
+                            "conflicting_vehicle_vin": conflicting_vehicle[1],
+                            "reason": "authoritative_vin_conflict",
+                        },
+                        review_required=True,
+                    )
+                    return listing_id, current_vehicle_id, "OPERATOR_REVIEW"
+
+                conn.execute(
+                    "UPDATE vehicles SET vin = ?, updated_at = datetime('now') WHERE id = ?",
+                    (vin, current_vehicle_id),
+                )
+                _record_mapping_provenance(
+                    conn,
+                    listing_id=listing_id,
+                    vehicle_id=current_vehicle_id,
+                    source_snapshot_id=source_snapshot_id,
+                    source_id=source_id,
+                    source_listing_id=source_listing_id,
+                    outcome="MATCHED_EXISTING_VEHICLE",
+                    evidence={
+                        "source_name": source_name,
+                        "source_listing_id": source_listing_id,
+                        "current_vehicle_id": current_vehicle_id,
+                        "current_vin": current_vin,
+                        "incoming_vin": vin,
+                        "reason": "vin_enrichment",
+                    },
+                    review_required=False,
+                )
+                return listing_id, current_vehicle_id, "MATCHED_EXISTING_VEHICLE"
+
+            if current_vin == vin:
+                _record_mapping_provenance(
+                    conn,
+                    listing_id=listing_id,
+                    vehicle_id=current_vehicle_id,
+                    source_snapshot_id=source_snapshot_id,
+                    source_id=source_id,
+                    source_listing_id=source_listing_id,
+                    outcome="EXISTING_LISTING",
+                    evidence={
+                        "source_name": source_name,
+                        "source_listing_id": source_listing_id,
+                        "current_vehicle_id": current_vehicle_id,
+                        "current_vin": current_vin,
+                        "incoming_vin": vin,
+                    },
+                    review_required=False,
+                )
+                return listing_id, current_vehicle_id, "EXISTING_LISTING"
+
+            conflicting_vehicle = conn.execute(
+                "SELECT id, vin FROM vehicles WHERE vin = ? AND id != ?",
+                (vin, current_vehicle_id),
+            ).fetchone()
+            _record_mapping_provenance(
+                conn,
+                listing_id=listing_id,
+                vehicle_id=current_vehicle_id,
+                source_snapshot_id=source_snapshot_id,
+                source_id=source_id,
+                source_listing_id=source_listing_id,
+                outcome="OPERATOR_REVIEW",
+                evidence={
+                    "source_name": source_name,
+                    "source_listing_id": source_listing_id,
+                    "current_vehicle_id": current_vehicle_id,
+                    "current_vin": current_vin,
+                    "incoming_vin": vin,
+                    "conflicting_vehicle_id": conflicting_vehicle[0] if conflicting_vehicle else None,
+                    "conflicting_vehicle_vin": conflicting_vehicle[1] if conflicting_vehicle else None,
+                    "reason": "authoritative_vin_conflict",
+                },
+                review_required=True,
+            )
+            return listing_id, current_vehicle_id, "OPERATOR_REVIEW"
+
+        vin = _extract_vin(snapshot)
+        if vin:
+            vehicle_row = conn.execute(
+                "SELECT id, vin FROM vehicles WHERE vin = ?",
+                (vin,),
+            ).fetchone()
+            if vehicle_row is not None:
+                vehicle_id = vehicle_row[0]
+                conn.execute(
+                    "UPDATE listings SET vehicle_id = ?, status = 'linked', updated_at = datetime('now') WHERE id = ?",
+                    (vehicle_id, listing_id),
+                )
+                _record_mapping_provenance(
+                    conn,
+                    listing_id=listing_id,
+                    vehicle_id=vehicle_id,
+                    source_snapshot_id=source_snapshot_id,
+                    source_id=source_id,
+                    source_listing_id=source_listing_id,
+                    outcome="MATCHED_EXISTING_VEHICLE",
+                    evidence={"vin": vin, "source_name": source_name},
+                    review_required=False,
+                )
+                return listing_id, vehicle_id, "MATCHED_EXISTING_VEHICLE"
+
+            payload = _canonical_vehicle_payload(snapshot)
+            vehicle_fields = (
+                vin,
+                payload.get("make"),
+                payload.get("model"),
+                payload.get("generation"),
+                payload.get("body_type"),
+                payload.get("engine_variant"),
+                payload.get("drivetrain"),
+                payload.get("transmission"),
+                payload.get("first_registration_year"),
+            )
+            conn.execute(
+                """
+                INSERT INTO vehicles (
+                    vin,
+                    make,
+                    model,
+                    generation,
+                    body_type,
+                    engine_variant,
+                    drivetrain,
+                    transmission,
+                    first_registration_year,
+                    created_at,
+                    updated_at,
+                    status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), 'active')
+                """,
+                vehicle_fields,
+            )
+            vehicle_id = conn.execute("SELECT id FROM vehicles WHERE vin = ? ORDER BY id DESC LIMIT 1", (vin,)).fetchone()[0]
+            conn.execute(
+                "UPDATE listings SET vehicle_id = ?, status = 'linked', updated_at = datetime('now') WHERE id = ?",
+                (vehicle_id, listing_id),
+            )
+            _record_mapping_provenance(
+                conn,
+                listing_id=listing_id,
+                vehicle_id=vehicle_id,
+                source_snapshot_id=source_snapshot_id,
+                source_id=source_id,
+                source_listing_id=source_listing_id,
+                outcome="CREATED_NEW_VEHICLE",
+                evidence={"vin": vin, "source_name": source_name},
+                review_required=False,
+            )
+            return listing_id, vehicle_id, "CREATED_NEW_VEHICLE"
+
+        conn.execute(
+            "UPDATE listings SET status = 'unresolved', updated_at = datetime('now') WHERE id = ?",
+            (listing_id,),
+        )
+        _record_mapping_provenance(
+            conn,
+            listing_id=listing_id,
+            vehicle_id=None,
+            source_snapshot_id=source_snapshot_id,
+            source_id=source_id,
+            source_listing_id=source_listing_id,
+            outcome="PROVISIONAL_UNRESOLVED",
+            evidence={
+                "source_name": source_name,
+                "source_listing_id": source_listing_id,
+                "missing_vin": True,
+            },
+            review_required=True,
+        )
+        return listing_id, None, "PROVISIONAL_UNRESOLVED"
+    finally:
+        if should_close:
+            conn.close()
+
+
+def resolve_canonical_vehicle_links(snapshots, *, dry_run=False):
+    """Persist canonical Listing + Vehicle resolution for a batch of snapshots."""
+    if dry_run:
+        return []
+    snapshot_list = list(snapshots or [])
+    if not snapshot_list:
+        return []
+
+    conn = get_connection()
+    try:
+        conn.execute("BEGIN")
+        results = []
+        seen = set()
+        for snapshot in snapshot_list:
+            listing_id, vehicle_id, outcome = resolve_canonical_listing_and_vehicle(snapshot, dry_run=False, conn=conn)
+            if listing_id is not None and listing_id not in seen:
+                seen.add(listing_id)
+                results.append({
+                    "listing_id": listing_id,
+                    "vehicle_id": vehicle_id,
+                    "outcome": outcome,
+                })
+        conn.commit()
+        return results
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def save_car(car):
 
     conn = None
@@ -835,6 +1310,61 @@ def init_database(conn):
         mapping_decision TEXT DEFAULT 'persisted_snapshot',
         canonical_target TEXT DEFAULT 'source_snapshot',
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS vehicles (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        vin TEXT,
+        make TEXT,
+        model TEXT,
+        generation TEXT,
+        body_type TEXT,
+        engine_variant TEXT,
+        drivetrain TEXT,
+        transmission TEXT,
+        first_registration_year INTEGER,
+        status TEXT DEFAULT 'active',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(vin)
+    )
+    """)
+
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS listings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source_id INTEGER NOT NULL,
+        source_listing_id TEXT NOT NULL,
+        source_listing_row_id INTEGER NOT NULL,
+        vehicle_id INTEGER,
+        canonical_url TEXT DEFAULT '',
+        status TEXT DEFAULT 'active',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(source_listing_row_id),
+        UNIQUE(source_id, source_listing_id),
+        FOREIGN KEY (source_listing_row_id) REFERENCES source_listings(id),
+        FOREIGN KEY (vehicle_id) REFERENCES vehicles(id)
+    )
+    """)
+
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS listing_vehicle_mappings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        listing_id INTEGER NOT NULL,
+        vehicle_id INTEGER,
+        source_snapshot_id INTEGER,
+        source_id INTEGER,
+        source_listing_id TEXT,
+        outcome TEXT NOT NULL,
+        evidence TEXT,
+        review_required INTEGER DEFAULT 0,
+        mapping_version TEXT DEFAULT 'arch-007-vehicle-mapping',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (listing_id) REFERENCES listings(id),
+        FOREIGN KEY (vehicle_id) REFERENCES vehicles(id)
     )
     """)
 
