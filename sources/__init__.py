@@ -24,6 +24,26 @@ from .registry import SourceRegistry
 from .service import SourceIngestionResult, SourceIngestionService
 
 
+def _sync_source_display_names(registry: SourceRegistry) -> None:
+    """Persist human-readable display names from adapter descriptors into the DB.
+
+    This runs once at registry build time so that the ``sources`` table always
+    holds the authoritative label that each adapter declares in its
+    ``descriptor().display_name``.  The update is idempotent — it only writes
+    when the stored value differs from the descriptor value.
+    """
+    import database
+
+    for entry in registry.list_enabled():
+        try:
+            source_name = entry.descriptor.source_name
+            display_name = entry.descriptor.display_name
+            if source_name and display_name:
+                database.update_source_display_name(source_name, display_name)
+        except Exception:
+            pass  # never block pipeline startup for a metadata sync failure
+
+
 def build_default_source_registry() -> SourceRegistry:
     registry = SourceRegistry()
     
@@ -58,6 +78,8 @@ def build_default_source_registry() -> SourceRegistry:
             configuration=pkw_de_config,
             enabled=pkw_de_config.get("enabled", True),
         )
+
+    _sync_source_display_names(registry)
     
     return registry
 

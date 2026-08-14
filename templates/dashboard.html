@@ -44,6 +44,14 @@ High score auto's:
 {{ data["stats"]["high_score_cars"] }}
 </p>
 
+{% if data["source_counts"] %}
+<hr>
+<p><strong>Actieve voorraad per bron</strong></p>
+{% for label, count in data["source_counts"].items() %}
+<p>{{ label }}: {{ count }}</p>
+{% endfor %}
+{% endif %}
+
 </div>
 
 
@@ -249,7 +257,7 @@ Bekijk auto
 <a class="detail-button"
 href="{{ car.url }}"
 target="_blank">
-AutoScout
+{{ car.source_label }}
 </a>
 
 

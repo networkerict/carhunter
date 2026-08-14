@@ -105,6 +105,10 @@ class Car:
         self.telegram_sent = row[telegram_sent_index] if len(row) > telegram_sent_index else 0
         self.telegram_sent_at = row[telegram_sent_at_index] if len(row) > telegram_sent_at_index else None
 
+        # Source identity — populated by database enrichment helpers, not by row columns.
+        self.source_name = None
+        self.source_label = "Listing"
+
 
     def summary(self):
 
