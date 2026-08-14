@@ -1890,3 +1890,486 @@ class TestMobileDeErrorHandling:
         assert listings[0].source_listing_id == "valid1"
         assert listings[1].source_listing_id == "valid2"
 
+
+
+# ===========================================================================
+# PKW.de Adapter Tests
+# ===========================================================================
+
+from datetime import datetime as _datetime
+
+
+def _pkw_search_result(listing_id="681247396872418378", price_customer=38950):
+    """Minimal realistic PKW.de search result (summary payload)."""
+    return {
+        "id": listing_id,
+        "name": "Audi A5 Cabrio 40 2.0 TDI quattro S Line",
+        "brand": {"id": 6, "name": "Audi"},
+        "model": {"id": 992, "parent_id": 6, "name": "A5"},
+        "bodytype": {"id": 2, "name": "Cabriolet"},
+        "initial_registration": "2022-07-01",
+        "mileage": 31142,
+        "price": {
+            "customer": price_customer,
+            "price_type": None,
+            "netto_price": 32731.0,
+            "initial_price": 41000,
+        },
+        "fueltype": {"id": 2, "name": "Diesel"},
+        "geartype": {"id": 2, "name": "Automatik"},
+        "power": {"kw": 140, "hp": 190},
+        "color": {
+            "exterior": {"id": 1, "name": "Schwarz"},
+            "interior": {"id": 4, "name": "Leder"},
+        },
+        "owner": {
+            "id": "178360920259386597",
+            "name": "Autohaus Muster GmbH",
+            "type": "dealer",
+            "phone": "0202-12345",
+        },
+        "location": {
+            "country": "DE",
+            "city": "Schwerte",
+            "zip": "58239",
+            "coordinates": {"lat": 51.4, "lon": 7.6},
+        },
+        "available_online": False,
+        "deleted": False,
+    }
+
+
+def _pkw_detail_payload(listing_id="681247396872418378"):
+    """Realistic PKW.de detail payload (superset of summary)."""
+    base = _pkw_search_result(listing_id)
+    base.update({
+        "description": "<p></p><b>Ausstattung:</b> Navi, Kamera",
+        "extras": [
+            {"id": 0, "name": "ABS"},
+            {"id": 3, "name": "Allradantrieb"},
+            {"id": 4, "name": "Alufelgen"},
+            {"id": 7, "name": "Bordcomputer"},
+        ],
+        "images": [
+            {
+                "thumb": "https://images.pkw.net/img-120x90.jpg",
+                "full": "https://images.pkw.net/img-640x480.jpg",
+                "original": "https://images.pkw.net/img-0x0.jpg",
+            }
+        ],
+        "equipment_line": "S line",
+    })
+    return base
+
+
+def _pkw_search_page(listing_ids, page=1, total_count=40, total_pages=2):
+    return {
+        "page": page,
+        "total": {"count": total_count, "pages": total_pages},
+        "links": [{"rel": "self", "href": f"https://www.pkw.de/api/v1/cars/search/basic?page={page}"}],
+        "results": [_pkw_search_result(lid) for lid in listing_ids],
+    }
+
+
+class TestPkwDeAdapterRegistration:
+    """1. Adapter is registered correctly."""
+
+    def test_adapter_is_registered_in_default_registry(self):
+        from sources import build_default_source_registry, PkwDeSourceAdapter
+        registry = build_default_source_registry()
+        adapter = registry.get("pkw_de")
+        assert isinstance(adapter, PkwDeSourceAdapter)
+
+    def test_adapter_source_name(self):
+        from sources.pkw_de import PkwDeSourceAdapter
+        adapter = PkwDeSourceAdapter(max_pages=1)
+        assert adapter.descriptor().source_name == "pkw_de"
+
+    def test_adapter_implements_source_adapter_protocol(self):
+        from sources import PkwDeSourceAdapter, SourceAdapter
+        adapter = PkwDeSourceAdapter(max_pages=1)
+        assert isinstance(adapter, SourceAdapter)
+
+    def test_source_name_in_snapshot_is_pkw_de(self):
+        from sources.pkw_de import PkwDeSourceAdapter
+        from sources.base import DiscoveredListing, SourceListingDetail
+        adapter = PkwDeSourceAdapter(max_pages=1)
+        listing = DiscoveredListing(
+            source_name="pkw_de",
+            source_listing_id="123",
+            source_url="https://suche.pkw.de/fahrzeuge/details/123",
+            discovered_at=_datetime.now(),
+            raw_summary_payload=_pkw_search_result("123"),
+        )
+        snapshot = adapter.to_source_snapshot(listing, None)
+        assert snapshot.source_name == "pkw_de"
+
+
+class TestPkwDeDiscovery:
+    """2–6. Search / discovery behaviour and pagination."""
+
+    def _adapter_with_mock(self, pages_data):
+        from sources.pkw_de import PkwDeSourceAdapter, PkwDeAPIClient
+        from unittest.mock import Mock
+        mock_client = Mock(spec=PkwDeAPIClient)
+        mock_client.get_json.side_effect = pages_data
+        return PkwDeSourceAdapter(max_pages=10, api_client=mock_client), mock_client
+
+    def test_search_creates_discovered_listings(self):
+        from sources.base import DiscoveryRequest, SourceContext
+        page = _pkw_search_page(["681247396872418378", "727928327740362618"], page=1, total_count=2, total_pages=1)
+        adapter, _ = self._adapter_with_mock([page])
+        listings = adapter.discover_listings(DiscoveryRequest(), SourceContext(source_name="pkw_de"))
+        assert len(listings) == 2
+
+    def test_stable_listing_id_preserved(self):
+        from sources.base import DiscoveryRequest, SourceContext
+        page = _pkw_search_page(["681247396872418378"], page=1, total_count=1, total_pages=1)
+        adapter, _ = self._adapter_with_mock([page])
+        listings = adapter.discover_listings(DiscoveryRequest(), SourceContext(source_name="pkw_de"))
+        assert listings[0].source_listing_id == "681247396872418378"
+
+    def test_source_url_generated_correctly(self):
+        from sources.base import DiscoveryRequest, SourceContext
+        lid = "681247396872418378"
+        page = _pkw_search_page([lid], page=1, total_count=1, total_pages=1)
+        adapter, _ = self._adapter_with_mock([page])
+        listings = adapter.discover_listings(DiscoveryRequest(), SourceContext(source_name="pkw_de"))
+        assert listings[0].source_url == f"https://suche.pkw.de/fahrzeuge/details/{lid}"
+
+    def test_pagination_across_multiple_pages(self):
+        from sources.base import DiscoveryRequest, SourceContext
+        p1 = _pkw_search_page(["a", "b"], page=1, total_count=4, total_pages=2)
+        p2 = _pkw_search_page(["c", "d"], page=2, total_count=4, total_pages=2)
+        adapter, mock_client = self._adapter_with_mock([p1, p2])
+        listings = adapter.discover_listings(DiscoveryRequest(), SourceContext(source_name="pkw_de"))
+        assert len(listings) == 4
+        assert mock_client.get_json.call_count == 2
+
+    def test_pagination_stops_at_total_pages(self):
+        from sources.base import DiscoveryRequest, SourceContext
+        p1 = _pkw_search_page(["a"], page=1, total_count=2, total_pages=2)
+        p2 = _pkw_search_page(["b"], page=2, total_count=2, total_pages=2)
+        adapter, mock_client = self._adapter_with_mock([p1, p2])
+        adapter.max_pages = 100
+        listings = adapter.discover_listings(DiscoveryRequest(), SourceContext(source_name="pkw_de"))
+        assert len(listings) == 2
+        assert mock_client.get_json.call_count == 2
+
+    def test_empty_results_stops_pagination(self):
+        from sources.base import DiscoveryRequest, SourceContext
+        p1 = _pkw_search_page(["x"], page=1, total_count=1, total_pages=2)
+        p_empty = {"page": 2, "total": {"count": 1, "pages": 2}, "results": []}
+        adapter, mock_client = self._adapter_with_mock([p1, p_empty])
+        listings = adapter.discover_listings(DiscoveryRequest(), SourceContext(source_name="pkw_de"))
+        assert len(listings) == 1
+
+    def test_duplicate_ids_across_pages_are_deduplicated(self):
+        from sources.base import DiscoveryRequest, SourceContext
+        p1 = _pkw_search_page(["dup-1", "dup-2"], page=1, total_count=2, total_pages=2)
+        p2 = _pkw_search_page(["dup-1", "dup-2"], page=2, total_count=2, total_pages=2)
+        adapter, _ = self._adapter_with_mock([p1, p2])
+        listings = adapter.discover_listings(DiscoveryRequest(), SourceContext(source_name="pkw_de"))
+        assert len(listings) == 2
+
+    def test_missing_listing_id_is_skipped(self):
+        from sources.base import DiscoveryRequest, SourceContext
+        good = _pkw_search_result("good")
+        no_id = dict(_pkw_search_result("x"))
+        no_id.pop("id")
+        page = {"page": 1, "total": {"count": 2, "pages": 1}, "results": [good, no_id]}
+        adapter, _ = self._adapter_with_mock([page])
+        listings = adapter.discover_listings(DiscoveryRequest(), SourceContext(source_name="pkw_de"))
+        assert len(listings) == 1
+        assert listings[0].source_listing_id == "good"
+
+
+class TestPkwDeFieldNormalization:
+    """7–16. Normalized field mapping."""
+
+    def _snapshot(self, listing_id="681247396872418378"):
+        from sources.pkw_de import PkwDeSourceAdapter
+        from sources.base import DiscoveredListing, SourceListingDetail
+        adapter = PkwDeSourceAdapter(max_pages=1)
+        listing = DiscoveredListing(
+            source_name="pkw_de",
+            source_listing_id=listing_id,
+            source_url=f"https://suche.pkw.de/fahrzeuge/details/{listing_id}",
+            discovered_at=_datetime.now(),
+            raw_summary_payload=_pkw_search_result(listing_id),
+        )
+        detail_obj = SourceListingDetail(
+            source_name="pkw_de",
+            source_listing_id=listing_id,
+            fetched_at=_datetime.now(),
+            raw_detail_payload=_pkw_detail_payload(listing_id),
+        )
+        return adapter.to_source_snapshot(listing, detail_obj)
+
+    def test_price_customer_normalization(self):
+        assert self._snapshot().extracted_fields["price"] == 38950
+
+    def test_price_is_integer(self):
+        assert isinstance(self._snapshot().extracted_fields["price"], int)
+
+    def test_mileage_normalization(self):
+        assert self._snapshot().extracted_fields["mileage"] == 31142
+
+    def test_mileage_is_integer(self):
+        assert isinstance(self._snapshot().extracted_fields["mileage"], int)
+
+    def test_first_registration(self):
+        assert self._snapshot().extracted_fields["first_registration"] == "2022-07-01"
+
+    def test_year_from_registration(self):
+        assert self._snapshot().extracted_fields["year"] == 2022
+
+    def test_make(self):
+        assert self._snapshot().extracted_fields["make"] == "Audi"
+
+    def test_model(self):
+        assert self._snapshot().extracted_fields["model"] == "A5"
+
+    def test_title(self):
+        assert "Audi A5" in self._snapshot().extracted_fields["title"]
+
+    def test_fuel(self):
+        assert self._snapshot().extracted_fields["fuel"] == "Diesel"
+
+    def test_transmission(self):
+        assert self._snapshot().extracted_fields["transmission"] == "Automatik"
+
+    def test_power_kw(self):
+        assert self._snapshot().extracted_fields["power_kw"] == 140
+
+    def test_power_hp(self):
+        assert self._snapshot().extracted_fields["power_hp"] == 190
+
+    def test_dealer_name(self):
+        assert self._snapshot().extracted_fields["seller_name"] == "Autohaus Muster GmbH"
+
+    def test_location_city(self):
+        assert self._snapshot().extracted_fields["location_city"] == "Schwerte"
+
+    def test_description_html_stripped(self):
+        desc = self._snapshot().extracted_fields.get("description", "")
+        assert "<" not in desc
+        assert "Ausstattung" in desc
+
+    def test_options_mapped(self):
+        opts = self._snapshot().extracted_fields.get("options", [])
+        assert "ABS" in opts
+        assert "Alufelgen" in opts
+
+    def test_drivetrain_awd_from_extras(self):
+        assert self._snapshot().extracted_fields.get("drivetrain") == "AWD"
+
+    def test_drivetrain_absent_without_awd_extras(self):
+        from sources.pkw_de import PkwDeSourceAdapter
+        from sources.base import DiscoveredListing, SourceListingDetail
+        adapter = PkwDeSourceAdapter(max_pages=1)
+        detail = _pkw_detail_payload("no-awd")
+        detail["extras"] = [{"id": 0, "name": "ABS"}, {"id": 4, "name": "Alufelgen"}]
+        listing = DiscoveredListing(
+            source_name="pkw_de", source_listing_id="no-awd",
+            source_url="https://suche.pkw.de/fahrzeuge/details/no-awd",
+            discovered_at=_datetime.now(),
+            raw_summary_payload=_pkw_search_result("no-awd"),
+        )
+        det = SourceListingDetail(source_name="pkw_de", source_listing_id="no-awd",
+                                   fetched_at=_datetime.now(), raw_detail_payload=detail)
+        snap = adapter.to_source_snapshot(listing, det)
+        assert snap.extracted_fields.get("drivetrain") is None
+
+    def test_colour(self):
+        assert self._snapshot().extracted_fields.get("colour") == "Schwarz"
+
+
+class TestPkwDeAvailability:
+    """Availability mapping."""
+
+    def _snap(self, deleted=False):
+        from sources.pkw_de import PkwDeSourceAdapter
+        from sources.base import DiscoveredListing
+        adapter = PkwDeSourceAdapter(max_pages=1)
+        raw = _pkw_search_result("av-test")
+        raw["deleted"] = deleted
+        listing = DiscoveredListing(
+            source_name="pkw_de", source_listing_id="av-test",
+            source_url="https://suche.pkw.de/fahrzeuge/details/av-test",
+            discovered_at=_datetime.now(), raw_summary_payload=raw,
+        )
+        return adapter.to_source_snapshot(listing, None)
+
+    def test_normal_listing_is_active(self):
+        assert self._snap(deleted=False).extracted_fields["availability"] == "ACTIVE"
+
+    def test_deleted_listing_is_inactive(self):
+        assert self._snap(deleted=True).extracted_fields["availability"] == "INACTIVE"
+
+    def test_availability_is_canonical_value(self):
+        assert self._snap().extracted_fields["availability"] in {"ACTIVE", "INACTIVE", "SOLD", "UNKNOWN"}
+
+
+class TestPkwDeDetailFetch:
+    """17–18. Detail fetch and failure isolation."""
+
+    def test_detail_fetch_success(self):
+        from sources.pkw_de import PkwDeSourceAdapter, PkwDeAPIClient
+        from sources.base import DiscoveredListing, SourceContext
+        from unittest.mock import Mock
+        mock_client = Mock(spec=PkwDeAPIClient)
+        mock_client.get_json.return_value = _pkw_detail_payload("681247396872418378")
+        adapter = PkwDeSourceAdapter(max_pages=1, api_client=mock_client)
+        listing = DiscoveredListing(
+            source_name="pkw_de", source_listing_id="681247396872418378",
+            source_url="https://suche.pkw.de/fahrzeuge/details/681247396872418378",
+            discovered_at=_datetime.now(),
+            raw_summary_payload=_pkw_search_result("681247396872418378"),
+        )
+        detail = adapter.fetch_listing_detail(listing, SourceContext(source_name="pkw_de"))
+        assert detail is not None
+        assert detail.source_listing_id == "681247396872418378"
+
+    def test_detail_failure_returns_none_not_exception(self):
+        from sources.pkw_de import PkwDeSourceAdapter, PkwDeAPIClient, PkwDeAPIError
+        from sources.base import DiscoveredListing, SourceContext
+        from unittest.mock import Mock
+        mock_client = Mock(spec=PkwDeAPIClient)
+        mock_client.get_json.side_effect = PkwDeAPIError("timeout")
+        adapter = PkwDeSourceAdapter(max_pages=1, api_client=mock_client)
+        listing = DiscoveredListing(
+            source_name="pkw_de", source_listing_id="bad",
+            source_url="https://suche.pkw.de/fahrzeuge/details/bad",
+            discovered_at=_datetime.now(),
+            raw_summary_payload=_pkw_search_result("bad"),
+        )
+        detail = adapter.fetch_listing_detail(listing, SourceContext(source_name="pkw_de"))
+        assert detail is None
+
+    def test_snapshot_produced_without_detail(self):
+        from sources.pkw_de import PkwDeSourceAdapter
+        from sources.base import DiscoveredListing
+        adapter = PkwDeSourceAdapter(max_pages=1)
+        listing = DiscoveredListing(
+            source_name="pkw_de", source_listing_id="no-det",
+            source_url="https://suche.pkw.de/fahrzeuge/details/no-det",
+            discovered_at=_datetime.now(),
+            raw_summary_payload=_pkw_search_result("no-det"),
+        )
+        snap = adapter.to_source_snapshot(listing, None)
+        assert snap is not None
+        assert snap.raw_detail_payload is None
+
+    def test_malformed_search_response_raises_pkwde_error(self):
+        from sources.pkw_de import PkwDeSourceAdapter, PkwDeAPIClient, PkwDeAPIError
+        from sources.base import DiscoveryRequest, SourceContext
+        from unittest.mock import Mock
+        mock_client = Mock(spec=PkwDeAPIClient)
+        mock_client.get_json.side_effect = PkwDeAPIError("invalid JSON")
+        adapter = PkwDeSourceAdapter(max_pages=1, api_client=mock_client)
+        try:
+            adapter.discover_listings(DiscoveryRequest(), SourceContext(source_name="pkw_de"))
+            assert False, "Expected PkwDeAPIError"
+        except PkwDeAPIError:
+            pass
+
+
+class TestPkwDeProvenance:
+    """19. Field provenance source_name = pkw_de."""
+
+    def test_all_provenance_entries_have_pkw_de_source_name(self):
+        from sources.pkw_de import PkwDeSourceAdapter
+        from sources.base import DiscoveredListing, SourceListingDetail
+        adapter = PkwDeSourceAdapter(max_pages=1)
+        listing = DiscoveredListing(
+            source_name="pkw_de", source_listing_id="prov-1",
+            source_url="https://suche.pkw.de/fahrzeuge/details/prov-1",
+            discovered_at=_datetime.now(),
+            raw_summary_payload=_pkw_search_result("prov-1"),
+        )
+        det = SourceListingDetail(
+            source_name="pkw_de", source_listing_id="prov-1",
+            fetched_at=_datetime.now(),
+            raw_detail_payload=_pkw_detail_payload("prov-1"),
+        )
+        snap = adapter.to_source_snapshot(listing, det)
+        for fname, prov in snap.field_provenance.items():
+            assert prov["source_name"] == "pkw_de", f"Field {fname!r} has wrong source_name"
+            assert prov["source_listing_id"] == "prov-1"
+
+
+class TestPkwDeCanonicalPersistence:
+    """20–21. Canonical persistence and coexistence with AutoScout24."""
+
+    def test_canonical_persistence_accepts_pkw_snapshot(self):
+        import os
+        import tempfile as _tempfile
+        db_path = os.path.join(_tempfile.mkdtemp(), "pkw-canon.db")
+        orig = config.DATABASE
+        config.DATABASE = db_path
+        database.get_connection().close()
+        try:
+            snap = SourceSnapshot(
+                source_name="pkw_de",
+                source_listing_id="681247396872418378",
+                source_url="https://suche.pkw.de/fahrzeuge/details/681247396872418378",
+                discovered_at=_datetime.now(),
+                fetched_at=_datetime.now(),
+                raw_summary_payload=_pkw_search_result("681247396872418378"),
+                raw_detail_payload=_pkw_detail_payload("681247396872418378"),
+                extracted_fields={"make": "Audi", "price": 38950},
+                field_provenance={"price": {"source_name": "pkw_de", "source_listing_id": "681247396872418378", "stage": "summary"}},
+            )
+            row_id = database.save_source_snapshot(snap)
+            assert row_id is not None
+            conn = database.get_connection()
+            try:
+                row = conn.execute("SELECT source_name FROM sources WHERE source_name = ?", ("pkw_de",)).fetchone()
+                assert row is not None
+            finally:
+                conn.close()
+        finally:
+            config.DATABASE = orig
+
+    def test_pkw_and_autoscout24_coexist(self):
+        import os
+        import tempfile as _tempfile
+        db_path = os.path.join(_tempfile.mkdtemp(), "pkw-dual.db")
+        orig = config.DATABASE
+        config.DATABASE = db_path
+        database.get_connection().close()
+        try:
+            pkw_snap = SourceSnapshot(
+                source_name="pkw_de",
+                source_listing_id="pkw-co-1",
+                source_url="https://suche.pkw.de/fahrzeuge/details/pkw-co-1",
+                discovered_at=_datetime.now(), fetched_at=_datetime.now(),
+                raw_summary_payload={"id": "pkw-co-1"},
+                raw_detail_payload=None,
+                extracted_fields={"price": 30000},
+                field_provenance={"price": {"source_name": "pkw_de", "source_listing_id": "pkw-co-1", "stage": "summary"}},
+            )
+            as24_snap = SourceSnapshot(
+                source_name="autoscout24",
+                source_listing_id="as24-co-1",
+                source_url="https://www.autoscout24.de/angebote/as24-co-1",
+                discovered_at=_datetime.now(), fetched_at=_datetime.now(),
+                raw_summary_payload={"id": "as24-co-1"},
+                raw_detail_payload=None,
+                extracted_fields={"price": 25000},
+                field_provenance={"price": {"source_name": "autoscout24", "source_listing_id": "as24-co-1", "stage": "summary"}},
+            )
+            database.save_source_snapshot(pkw_snap)
+            database.save_source_snapshot(as24_snap)
+            conn = database.get_connection()
+            try:
+                sources = {r[0] for r in conn.execute("SELECT source_name FROM sources").fetchall()}
+                assert "pkw_de" in sources
+                assert "autoscout24" in sources
+                count = conn.execute("SELECT COUNT(*) FROM source_listings").fetchone()[0]
+                assert count == 2
+            finally:
+                conn.close()
+        finally:
+            config.DATABASE = orig
