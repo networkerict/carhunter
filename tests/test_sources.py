@@ -222,11 +222,62 @@ class TestSourceIngestionService(unittest.TestCase):
         self.tempdir.cleanup()
 
     def test_compatibility_payload_passthrough(self):
-        snapshot = mock.Mock(extracted_fields={"fingerprint": "fp-1", "title": "Audi A5"})
+        snapshot = mock.Mock(extracted_fields={"fingerprint": "fp-1", "title": "Audi A5"}, source_url="")
         self.assertEqual(
             snapshot_to_compatibility_payload(snapshot),
             {"fingerprint": "fp-1", "title": "Audi A5"},
         )
+
+    def test_compatibility_payload_normalises_mileage_to_km(self):
+        # Adapters that emit "mileage" (not "km") must still populate cars.km.
+        snapshot = mock.Mock(
+            extracted_fields={"mileage": 10769, "title": "Audi A5"},
+            source_url="",
+        )
+        payload = snapshot_to_compatibility_payload(snapshot)
+        self.assertEqual(payload["km"], 10769)
+        self.assertEqual(payload["mileage"], 10769)  # original key preserved
+
+    def test_compatibility_payload_km_takes_precedence_over_mileage(self):
+        # When "km" is already set it must not be overwritten by "mileage".
+        snapshot = mock.Mock(
+            extracted_fields={"km": 50000, "mileage": 99999},
+            source_url="",
+        )
+        payload = snapshot_to_compatibility_payload(snapshot)
+        self.assertEqual(payload["km"], 50000)
+
+    def test_compatibility_payload_injects_source_url_as_url(self):
+        # Adapters that expose source_url but no "url" key must populate cars.url.
+        snapshot = mock.Mock(
+            extracted_fields={"title": "Audi A5"},
+            source_url="https://suche.pkw.de/fahrzeuge/details/123",
+        )
+        payload = snapshot_to_compatibility_payload(snapshot)
+        self.assertEqual(payload["url"], "https://suche.pkw.de/fahrzeuge/details/123")
+
+    def test_compatibility_payload_existing_url_not_overwritten(self):
+        # When the adapter already provides a "url" key it must not be replaced.
+        snapshot = mock.Mock(
+            extracted_fields={"url": "https://example.com/existing"},
+            source_url="https://should.not.win/",
+        )
+        payload = snapshot_to_compatibility_payload(snapshot)
+        self.assertEqual(payload["url"], "https://example.com/existing")
+
+    def test_compatibility_payload_autoscout24_unchanged(self):
+        # AutoScout24 uses "km" and "url" directly — must not be affected.
+        snapshot = mock.Mock(
+            extracted_fields={
+                "km": 121133,
+                "url": "https://www.autoscout24.de/angebote/listing-abc",
+                "fingerprint": "fp-as24",
+            },
+            source_url="https://www.autoscout24.de/angebote/listing-abc",
+        )
+        payload = snapshot_to_compatibility_payload(snapshot)
+        self.assertEqual(payload["km"], 121133)
+        self.assertEqual(payload["url"], "https://www.autoscout24.de/angebote/listing-abc")
 
     def test_service_produces_snapshots_and_does_not_own_persistence(self):
         registry = SourceRegistry()
