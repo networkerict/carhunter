@@ -48,17 +48,20 @@ def apply_compatibility_inventory_updates(
     if dry_run:
         observed_fingerprints: set[str] = set()
         observed_autoscout_ids: set[str] = set()
+        observed_urls: set[str] = set()
         new_cars = 0
 
         for snapshot in snapshots:
             payload = snapshot_to_compatibility_payload(snapshot)
             autoscout_id = str(payload.get("id") or payload.get("autoscout_id") or "")
             fingerprint = str(payload.get("fingerprint") or "")
+            url = str(payload.get("url") or "")
 
             exists = (
                 (fingerprint and fingerprint in observed_fingerprints)
                 or (autoscout_id and autoscout_id in observed_autoscout_ids)
-                or _compatibility_record_exists(fingerprint, autoscout_id)
+                or (url and url in observed_urls)
+                or _compatibility_record_exists(fingerprint, autoscout_id, url)
             )
             if not exists:
                 new_cars += 1
@@ -67,6 +70,8 @@ def apply_compatibility_inventory_updates(
                 observed_fingerprints.add(fingerprint)
             if autoscout_id:
                 observed_autoscout_ids.add(autoscout_id)
+            if url:
+                observed_urls.add(url)
 
         return CompatibilityInventoryResult(
             new_cars=new_cars,
@@ -114,20 +119,34 @@ def count_missing_cars_for_active_fingerprints(active_fingerprints: list[str]) -
         connection.close()
 
 
-def _compatibility_record_exists(fingerprint: str, autoscout_id: str) -> bool:
+def _compatibility_record_exists(fingerprint: str, autoscout_id: str, url: str = "") -> bool:
     connection = database.get_connection()
     try:
-        row = connection.execute(
-            """
-            SELECT id
-            FROM cars
-            WHERE fingerprint = ?
-            OR autoscout_id = ?
-            ORDER BY id
-            LIMIT 1
-            """,
-            (fingerprint, autoscout_id),
-        ).fetchone()
+        if fingerprint or autoscout_id:
+            row = connection.execute(
+                """
+                SELECT id
+                FROM cars
+                WHERE fingerprint = ?
+                OR autoscout_id = ?
+                ORDER BY id
+                LIMIT 1
+                """,
+                (fingerprint, autoscout_id),
+            ).fetchone()
+        elif url:
+            row = connection.execute(
+                """
+                SELECT id
+                FROM cars
+                WHERE url = ?
+                ORDER BY id
+                LIMIT 1
+                """,
+                (url,),
+            ).fetchone()
+        else:
+            row = None
         return row is not None
     finally:
         connection.close()

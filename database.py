@@ -1316,21 +1316,39 @@ def save_car(car):
 
         autoscout_id = car.get("id") or car.get("autoscout_id")
         fingerprint = car.get("fingerprint")
+        url = car.get("url") or ""
 
-        existing = conn.execute(
-            """
-            SELECT id, price
-            FROM cars
-            WHERE fingerprint = ?
-            OR autoscout_id = ?
-            ORDER BY id
-            LIMIT 1
-            """,
-            (
-                fingerprint,
-                autoscout_id,
-            )
-        ).fetchone()
+        # Prefer fingerprint/autoscout_id match; fall back to url when both are absent.
+        # Without a url fallback, PKW.de rows (no fingerprint, no autoscout_id) are
+        # never found and a fresh INSERT is issued on every pipeline run.
+        if fingerprint or autoscout_id:
+            existing = conn.execute(
+                """
+                SELECT id, price
+                FROM cars
+                WHERE fingerprint = ?
+                OR autoscout_id = ?
+                ORDER BY id
+                LIMIT 1
+                """,
+                (
+                    fingerprint,
+                    autoscout_id,
+                )
+            ).fetchone()
+        elif url:
+            existing = conn.execute(
+                """
+                SELECT id, price
+                FROM cars
+                WHERE url = ?
+                ORDER BY id
+                LIMIT 1
+                """,
+                (url,)
+            ).fetchone()
+        else:
+            existing = None
 
         is_new = existing is None
 
