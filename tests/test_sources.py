@@ -3413,3 +3413,674 @@ class TestDuplicateDetection(unittest.TestCase):
         self.assertEqual(row[1], "VERY_STRONG",
                          "Revived pair must be correctly rescored")
 
+
+
+class TestDuplicateReviewPortal(unittest.TestCase):
+    """
+    Tests for the duplicate-review portal DB helpers in duplicate_detection.py.
+    Uses isolated temporary databases — no live inventory dependency.
+    """
+
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.orig_db = config.DATABASE
+        config.DATABASE = os.path.join(self.tempdir.name, "portal_test.db")
+        database.get_connection().close()
+        import duplicate_detection as _dd
+        self._dd = _dd
+        self._conn = database.get_connection()
+        _dd.ensure_schema(self._conn)
+        self._conn.commit()
+        self._populate_fixtures()
+
+    def tearDown(self):
+        self._conn.close()
+        config.DATABASE = self.orig_db
+        self.tempdir.cleanup()
+
+    # ── fixture helpers (same pattern as TestDuplicateDetection) ──────────
+
+    def _add_source(self, name, display_name=None):
+        self._conn.execute(
+            "INSERT OR IGNORE INTO sources (source_name, display_name) VALUES (?,?)",
+            (name, display_name or name),
+        )
+        return self._conn.execute(
+            "SELECT id FROM sources WHERE source_name=?", (name,)
+        ).fetchone()[0]
+
+    def _add_source_listing(self, source_id, listing_id, url):
+        self._conn.execute(
+            "INSERT INTO source_listings (source_id, source_listing_id, source_url) VALUES (?,?,?)",
+            (source_id, listing_id, url),
+        )
+        return self._conn.execute(
+            "SELECT id FROM source_listings WHERE source_id=? AND source_listing_id=?",
+            (source_id, listing_id),
+        ).fetchone()[0]
+
+    def _add_snapshot(self, source_id, listing_id, fields):
+        import json as _json
+        sl_row = self._conn.execute(
+            "SELECT id FROM source_listings WHERE source_id=? AND source_listing_id=?",
+            (source_id, listing_id),
+        ).fetchone()
+        self._conn.execute(
+            """INSERT OR IGNORE INTO source_snapshots
+               (source_id, source_listing_id, snapshot_hash, extracted_fields,
+                discovered_at, fetched_at)
+               VALUES (?,?,?,?,datetime('now'),datetime('now'))""",
+            (source_id, listing_id, f"h-{listing_id}", _json.dumps(fields)),
+        )
+        return self._conn.execute(
+            "SELECT id FROM source_snapshots WHERE source_id=? AND source_listing_id=?",
+            (source_id, listing_id),
+        ).fetchone()[0]
+
+    def _add_listing(self, source_id, source_listing_id, sl_row_id, snap_id,
+                     price, mileage, seller):
+        self._conn.execute(
+            """INSERT INTO listings
+               (source_id, source_listing_id, source_listing_row_id,
+                current_price, current_mileage, current_seller,
+                latest_source_snapshot_id, availability)
+               VALUES (?,?,?,?,?,?,?,'ACTIVE')""",
+            (source_id, source_listing_id, sl_row_id, price, mileage, seller, snap_id),
+        )
+        return self._conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    def _insert_candidate(self, lid_a, lid_b, score, classification, status="OPEN",
+                          evidence=None, differences=None, comment=None, reviewed_at=None):
+        import json as _json
+        a, b = min(lid_a, lid_b), max(lid_a, lid_b)
+        self._conn.execute(
+            """INSERT INTO listing_duplicate_candidates
+               (listing_id_a, listing_id_b, score, classification, evidence, differences,
+                status, operator_comment, reviewed_at, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,datetime('now'),datetime('now'))""",
+            (a, b, score, classification,
+             _json.dumps(evidence or []), _json.dumps(differences or []),
+             status, comment, reviewed_at),
+        )
+        self._conn.commit()
+        return self._conn.execute(
+            "SELECT id FROM listing_duplicate_candidates WHERE listing_id_a=? AND listing_id_b=?",
+            (a, b),
+        ).fetchone()[0]
+
+    def _populate_fixtures(self):
+        sid_as24 = self._add_source("autoscout24", "AutoScout24")
+        sid_pkw  = self._add_source("pkw_de", "PKW.de")
+        self.sid_as24 = sid_as24
+        self.sid_pkw  = sid_pkw
+
+        sl1 = self._add_source_listing(sid_as24, "as24-p1",
+                                       "https://www.autoscout24.de/angebote/as24-p1")
+        snap1 = self._add_snapshot(sid_as24, "as24-p1",
+                                   {"title": "Audi A5 45 TFSI", "year": 2024})
+        self.lid_a1 = self._add_listing(sid_as24, "as24-p1", sl1, snap1,
+                                        47650, 19500, "Autocenter Neuss GmbH")
+
+        sl2 = self._add_source_listing(sid_pkw, "pkw-p1",
+                                       "https://suche.pkw.de/fahrzeuge/details/pkw-p1")
+        snap2 = self._add_snapshot(sid_pkw, "pkw-p1",
+                                   {"title": "Audi A5 Cabriolet 45 TFSI quattro S line",
+                                    "year": 2024})
+        self.lid_p1 = self._add_listing(sid_pkw, "pkw-p1", sl2, snap2,
+                                        47650, 19500, "AUTOCENTER NEUSS GmbH")
+
+        # Second cross-source pair (STRONG)
+        sl3 = self._add_source_listing(sid_as24, "as24-p2",
+                                       "https://www.autoscout24.de/angebote/as24-p2")
+        snap3 = self._add_snapshot(sid_as24, "as24-p2",
+                                   {"title": "Audi A5 2.0 TFSI", "year": 2022})
+        self.lid_a2 = self._add_listing(sid_as24, "as24-p2", sl3, snap3,
+                                        28000, 60000, "Autohaus Muster GmbH")
+
+        sl4 = self._add_source_listing(sid_pkw, "pkw-p2",
+                                       "https://suche.pkw.de/fahrzeuge/details/pkw-p2")
+        snap4 = self._add_snapshot(sid_pkw, "pkw-p2",
+                                   {"title": "Audi A5 2.0 TFSI quattro", "year": 2022})
+        self.lid_p2 = self._add_listing(sid_pkw, "pkw-p2", sl4, snap4,
+                                        28000, 60000, "Autohaus Muster")
+
+        self._conn.commit()
+
+        # Persist candidates
+        self.cid_vs = self._insert_candidate(
+            self.lid_a1, self.lid_p1, 93, "VERY_STRONG", "OPEN",
+            evidence=["exact price: 47650", "exact mileage: 19500 km", "same seller: Autocenter Neuss"],
+        )
+        self.cid_strong = self._insert_candidate(
+            self.lid_a2, self.lid_p2, 75, "STRONG", "OPEN",
+            evidence=["exact price: 28000", "exact mileage: 60000 km"],
+        )
+
+    # ── Tests ──────────────────────────────────────────────────────────────
+
+    def test_list_defaults_open_strong_very_strong(self):
+        """Default list must return OPEN VERY_STRONG and STRONG, not LOW."""
+        # Insert a LOW candidate
+        self._insert_candidate(self.lid_a1, self.lid_p2, 20, "LOW", "OPEN")
+        candidates = self._dd.get_duplicate_candidates(conn=self._conn)
+        classifications = {c["classification"] for c in candidates}
+        self.assertIn("VERY_STRONG", classifications)
+        self.assertIn("STRONG", classifications)
+        self.assertNotIn("LOW", classifications,
+                         "LOW candidates must be excluded from default list")
+
+    def test_list_excludes_stale_by_default(self):
+        """Default list (status=None → OPEN only) must exclude STALE rows."""
+        self._insert_candidate(self.lid_a1, self.lid_p2, 80, "STRONG", "STALE")
+        candidates = self._dd.get_duplicate_candidates(conn=self._conn)
+        statuses = {c["status"] for c in candidates}
+        self.assertNotIn("STALE", statuses,
+                         "STALE candidates must not appear in the default queue")
+
+    def test_list_sorted_very_strong_first(self):
+        """VERY_STRONG must appear before STRONG in default list."""
+        candidates = self._dd.get_duplicate_candidates(conn=self._conn)
+        self.assertGreater(len(candidates), 1)
+        self.assertEqual(candidates[0]["classification"], "VERY_STRONG",
+                         "VERY_STRONG must be first in sorted list")
+
+    def test_candidate_detail_includes_both_source_labels(self):
+        """Detail must contain source_label for both listings."""
+        detail = self._dd.get_duplicate_candidate(self.cid_vs, conn=self._conn)
+        self.assertIsNotNone(detail)
+        label_a = detail["listing_a"]["source_label"]
+        label_b = detail["listing_b"]["source_label"]
+        # Neither label must be empty/generic
+        self.assertTrue(label_a, "source_label for listing_a must not be empty")
+        self.assertTrue(label_b, "source_label for listing_b must not be empty")
+        # Labels must be different (different sources)
+        self.assertNotEqual(label_a, label_b,
+                            "Two different sources must have different labels")
+
+    def test_autoscout24_url_in_detail(self):
+        """AutoScout24 listing must expose its original URL."""
+        detail = self._dd.get_duplicate_candidate(self.cid_vs, conn=self._conn)
+        as24_side = (
+            detail["listing_a"] if detail["listing_a"]["source_label"] == "AutoScout24"
+            else detail["listing_b"]
+        )
+        self.assertIn("autoscout24.de", as24_side["source_url"],
+                      "AutoScout24 URL must point to autoscout24.de")
+
+    def test_pkwde_url_in_detail(self):
+        """PKW.de listing must expose its original URL."""
+        detail = self._dd.get_duplicate_candidate(self.cid_vs, conn=self._conn)
+        pkw_side = (
+            detail["listing_a"] if "pkw" in detail["listing_a"]["source_label"].lower()
+            else detail["listing_b"]
+        )
+        self.assertIn("pkw.de", pkw_side["source_url"],
+                      "PKW.de URL must point to pkw.de")
+
+    def test_source_label_not_hardcoded(self):
+        """source_label must come from sources.display_name, not hardcoded strings."""
+        # Add a new generic source
+        sid_new = self._add_source("test_source_xyz", "TestSource XYZ")
+        sl = self._add_source_listing(sid_new, "xyz-1", "https://test.example.com/1")
+        snap = self._add_snapshot(sid_new, "xyz-1", {"title": "Test Car"})
+        lid_new = self._add_listing(sid_new, "xyz-1", sl, snap, 47650, 19500, "Test Dealer")
+        self._conn.commit()
+
+        a, b = min(self.lid_a1, lid_new), max(self.lid_a1, lid_new)
+        cid = self._insert_candidate(a, b, 80, "STRONG")
+        detail = self._dd.get_duplicate_candidate(cid, conn=self._conn)
+        labels = {detail["listing_a"]["source_label"], detail["listing_b"]["source_label"]}
+        self.assertIn("TestSource XYZ", labels,
+                      "source_label must reflect sources.display_name for any source")
+
+    def test_review_confirmed_same_persists(self):
+        """CONFIRMED_SAME must be stored with reviewed_at timestamp."""
+        self._dd.update_duplicate_candidate_review(
+            self.cid_vs,
+            status="CONFIRMED_SAME",
+            operator_comment="Exact match on all fields",
+            conn=self._conn,
+        )
+        row = self._conn.execute(
+            "SELECT status, operator_comment, reviewed_at FROM listing_duplicate_candidates WHERE id=?",
+            (self.cid_vs,),
+        ).fetchone()
+        self.assertEqual(row[0], "CONFIRMED_SAME")
+        self.assertEqual(row[1], "Exact match on all fields")
+        self.assertIsNotNone(row[2], "reviewed_at must be set")
+
+    def test_review_confirmed_different_persists(self):
+        """CONFIRMED_DIFFERENT must be stored."""
+        self._dd.update_duplicate_candidate_review(
+            self.cid_vs, status="CONFIRMED_DIFFERENT",
+            operator_comment="Different colour", conn=self._conn,
+        )
+        row = self._conn.execute(
+            "SELECT status FROM listing_duplicate_candidates WHERE id=?", (self.cid_vs,)
+        ).fetchone()
+        self.assertEqual(row[0], "CONFIRMED_DIFFERENT")
+
+    def test_review_unsure_persists(self):
+        """UNSURE status must be stored."""
+        self._dd.update_duplicate_candidate_review(
+            self.cid_vs, status="UNSURE",
+            operator_comment="Cannot determine from available info", conn=self._conn,
+        )
+        row = self._conn.execute(
+            "SELECT status FROM listing_duplicate_candidates WHERE id=?", (self.cid_vs,)
+        ).fetchone()
+        self.assertEqual(row[0], "UNSURE")
+
+    def test_comment_persists(self):
+        """operator_comment must be stored exactly as entered."""
+        comment = "Dealer phones match, exact mileage, same options list"
+        self._dd.update_duplicate_candidate_review(
+            self.cid_vs, status="CONFIRMED_SAME",
+            operator_comment=comment, conn=self._conn,
+        )
+        row = self._conn.execute(
+            "SELECT operator_comment FROM listing_duplicate_candidates WHERE id=?", (self.cid_vs,)
+        ).fetchone()
+        self.assertEqual(row[0], comment)
+
+    def test_reviewed_at_is_set(self):
+        """reviewed_at must be populated on review."""
+        self._dd.update_duplicate_candidate_review(
+            self.cid_vs, status="CONFIRMED_SAME", conn=self._conn,
+        )
+        row = self._conn.execute(
+            "SELECT reviewed_at FROM listing_duplicate_candidates WHERE id=?", (self.cid_vs,)
+        ).fetchone()
+        self.assertIsNotNone(row[0])
+        # Must be a parseable timestamp
+        from datetime import datetime as _dt
+        _dt.fromisoformat(row[0])
+
+    def test_review_does_not_change_vehicle_id(self):
+        """Reviewing a candidate must never set vehicle_id on any listing."""
+        self._dd.update_duplicate_candidate_review(
+            self.cid_vs, status="CONFIRMED_SAME",
+            operator_comment="Confirmed", conn=self._conn,
+        )
+        rows = self._conn.execute(
+            "SELECT COUNT(*) FROM listings WHERE vehicle_id IS NOT NULL"
+        ).fetchone()[0]
+        self.assertEqual(rows, 0, "Review must never set vehicle_id")
+
+    def test_review_status_survives_detector_rescore(self):
+        """Operator decision must survive a full detection rescore."""
+        self._dd.update_duplicate_candidate_review(
+            self.cid_vs, status="CONFIRMED_SAME",
+            operator_comment="Confirmed by human", conn=self._conn,
+        )
+        # Rescore via run_detection
+        self._dd.run_detection(dry_run=False, conn=self._conn)
+        row = self._conn.execute(
+            "SELECT status, operator_comment FROM listing_duplicate_candidates WHERE id=?",
+            (self.cid_vs,),
+        ).fetchone()
+        self.assertEqual(row[0], "CONFIRMED_SAME",
+                         "Operator decision must survive detector rescore")
+        self.assertEqual(row[1], "Confirmed by human")
+
+    def test_next_open_navigation(self):
+        """get_next_open_candidate must return the next OPEN candidate after current."""
+        # cid_vs is VERY_STRONG, cid_strong is STRONG — after confirming vs, next = strong
+        self._dd.update_duplicate_candidate_review(
+            self.cid_vs, status="CONFIRMED_SAME", conn=self._conn,
+        )
+        # cid_vs is now CONFIRMED_SAME, not OPEN — next open from queue top
+        next_id = self._dd.get_next_open_candidate(conn=self._conn)
+        self.assertEqual(next_id, self.cid_strong,
+                         "Next open after review must point to next OPEN candidate")
+
+    def test_next_open_returns_none_when_queue_empty(self):
+        """get_next_open_candidate must return None when all reviewable candidates are reviewed."""
+        for cid in [self.cid_vs, self.cid_strong]:
+            self._dd.update_duplicate_candidate_review(
+                cid, status="CONFIRMED_SAME", conn=self._conn,
+            )
+        result = self._dd.get_next_open_candidate(conn=self._conn)
+        self.assertIsNone(result, "Empty review queue must return None")
+
+    def test_review_summary_counts(self):
+        """get_review_summary must return correct counts."""
+        self._dd.update_duplicate_candidate_review(
+            self.cid_vs, status="CONFIRMED_SAME", conn=self._conn,
+        )
+        summary = self._dd.get_review_summary(conn=self._conn)
+        self.assertEqual(summary.get("CONFIRMED_SAME", 0), 1)
+        self.assertEqual(summary.get("OPEN", 0), 1)
+
+    def test_webapp_duplicates_list_route(self):
+        """GET /duplicates must return 200 with candidate data."""
+        import webapp
+        with webapp.app.test_client() as client:
+            resp = client.get("/duplicates")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.data.decode()
+        self.assertIn("Duplicate Review", body)
+
+    def test_webapp_duplicates_detail_route(self):
+        """GET /duplicates/<id> must return 200 with source labels."""
+        import webapp
+        # Run detection to create real candidates in the portal test DB
+        self._dd.run_detection(dry_run=False, conn=self._conn)
+        a, b = min(self.lid_a1, self.lid_p1), max(self.lid_a1, self.lid_p1)
+        cid = self._conn.execute(
+            "SELECT id FROM listing_duplicate_candidates WHERE listing_id_a=? AND listing_id_b=?",
+            (a, b),
+        ).fetchone()[0]
+        with webapp.app.test_client() as client:
+            resp = client.get(f"/duplicates/{cid}")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.data.decode()
+        self.assertIn("AutoScout24", body)
+        self.assertIn("PKW.de", body)
+
+    def test_webapp_duplicates_detail_404(self):
+        """GET /duplicates/99999 must return 404."""
+        import webapp
+        with webapp.app.test_client() as client:
+            resp = client.get("/duplicates/99999")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_webapp_review_post_persists(self):
+        """POST /duplicates/<id>/review must persist status and redirect."""
+        import webapp
+        with webapp.app.test_client() as client:
+            resp = client.post(
+                f"/duplicates/{self.cid_vs}/review",
+                data={"status": "CONFIRMED_SAME",
+                      "operator_comment": "Confirmed by test"},
+                follow_redirects=False,
+            )
+        self.assertIn(resp.status_code, (302, 303),
+                      "Review POST must redirect")
+        row = self._conn.execute(
+            "SELECT status, operator_comment FROM listing_duplicate_candidates WHERE id=?",
+            (self.cid_vs,),
+        ).fetchone()
+        self.assertEqual(row[0], "CONFIRMED_SAME")
+        self.assertEqual(row[1], "Confirmed by test")
+
+    def test_invalid_review_status_rejected(self):
+        """POST with an unsupported status value must return 400."""
+        import webapp
+        with webapp.app.test_client() as client:
+            resp = client.post(
+                f"/duplicates/{self.cid_vs}/review",
+                data={"status": "MERGE_NOW"},
+                follow_redirects=False,
+            )
+        self.assertEqual(resp.status_code, 400,
+                         "Invalid status must be rejected with 400")
+        # Row must be unchanged
+        row = self._conn.execute(
+            "SELECT status FROM listing_duplicate_candidates WHERE id=?", (self.cid_vs,)
+        ).fetchone()
+        self.assertEqual(row[0], "OPEN", "Status must not change on invalid POST")
+
+    def test_review_modifies_no_vehicle_or_listing_identity(self):
+        """Review POST must not touch listings, vehicles, source_listings, or cars."""
+        import webapp
+        # Record baseline counts
+        before_listings = self._conn.execute("SELECT COUNT(*) FROM listings").fetchone()[0]
+        before_sources  = self._conn.execute("SELECT COUNT(*) FROM source_listings").fetchone()[0]
+
+        with webapp.app.test_client() as client:
+            client.post(
+                f"/duplicates/{self.cid_vs}/review",
+                data={"status": "CONFIRMED_SAME", "operator_comment": "test"},
+                follow_redirects=False,
+            )
+
+        after_listings = self._conn.execute("SELECT COUNT(*) FROM listings").fetchone()[0]
+        after_sources  = self._conn.execute("SELECT COUNT(*) FROM source_listings").fetchone()[0]
+        vehicle_ids    = self._conn.execute(
+            "SELECT COUNT(*) FROM listings WHERE vehicle_id IS NOT NULL"
+        ).fetchone()[0]
+
+        self.assertEqual(before_listings, after_listings, "listings count must not change")
+        self.assertEqual(before_sources,  after_sources,  "source_listings count must not change")
+        self.assertEqual(vehicle_ids, 0, "vehicle_id must remain NULL after review")
+
+
+class TestDuplicateSchemaMigration(unittest.TestCase):
+    """
+    Tests that verify ensure_schema() correctly migrates databases that were
+    created with the old (incomplete) CHECK constraint.
+    """
+
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.orig_db = config.DATABASE
+        config.DATABASE = os.path.join(self.tempdir.name, "migration_test.db")
+        database.get_connection().close()
+        import duplicate_detection as _dd
+        self._dd = _dd
+        self._conn = database.get_connection()
+
+    def tearDown(self):
+        self._conn.close()
+        config.DATABASE = self.orig_db
+        self.tempdir.cleanup()
+
+    def _create_old_schema(self):
+        """Create the original v1 schema without STALE/UNSURE and without new columns."""
+        self._conn.executescript("""
+            CREATE TABLE IF NOT EXISTS listing_duplicate_candidates (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                listing_id_a      INTEGER NOT NULL,
+                listing_id_b      INTEGER NOT NULL,
+                score             INTEGER NOT NULL,
+                classification    TEXT NOT NULL,
+                evidence          TEXT NOT NULL DEFAULT '[]',
+                differences       TEXT NOT NULL DEFAULT '[]',
+                status            TEXT NOT NULL DEFAULT 'OPEN',
+                created_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(listing_id_a, listing_id_b),
+                CHECK (listing_id_a < listing_id_b),
+                CHECK (status IN ('OPEN','CONFIRMED_SAME','CONFIRMED_DIFFERENT','DISMISSED'))
+            );
+        """)
+        self._conn.commit()
+
+    def _insert_old_row(self, lid_a, lid_b, score, classification, status="OPEN",
+                        comment=None):
+        """Insert a row compatible with the old schema."""
+        import json as _json
+        a, b = min(lid_a, lid_b), max(lid_a, lid_b)
+        self._conn.execute(
+            """INSERT INTO listing_duplicate_candidates
+               (listing_id_a, listing_id_b, score, classification, evidence, differences,
+                status, created_at, updated_at)
+               VALUES (?,?,?,?,'[]','[]',?,datetime('now'),datetime('now'))""",
+            (a, b, score, classification, status),
+        )
+        self._conn.commit()
+        return self._conn.execute(
+            "SELECT id FROM listing_duplicate_candidates WHERE listing_id_a=? AND listing_id_b=?",
+            (a, b),
+        ).fetchone()[0]
+
+    def test_migration_adds_new_columns(self):
+        """ensure_schema must add last_evaluated_at, operator_comment, reviewed_at."""
+        self._create_old_schema()
+        self._dd.ensure_schema(self._conn)
+        cols = {r[1] for r in self._conn.execute(
+            "PRAGMA table_info(listing_duplicate_candidates)"
+        ).fetchall()}
+        self.assertIn("last_evaluated_at", cols)
+        self.assertIn("operator_comment", cols)
+        self.assertIn("reviewed_at", cols)
+
+    def test_migration_enables_unsure_status(self):
+        """After migration, UNSURE must be accepted by the CHECK constraint."""
+        self._create_old_schema()
+        cid = self._insert_old_row(1, 2, 80, "STRONG", "OPEN")
+        self._dd.ensure_schema(self._conn)
+        self._conn.commit()
+        # Should not raise
+        self._conn.execute(
+            "UPDATE listing_duplicate_candidates SET status='UNSURE' WHERE id=?", (cid,)
+        )
+        self._conn.commit()
+        row = self._conn.execute(
+            "SELECT status FROM listing_duplicate_candidates WHERE id=?", (cid,)
+        ).fetchone()
+        self.assertEqual(row[0], "UNSURE",
+                         "UNSURE must be accepted after migration")
+
+    def test_migration_enables_stale_status(self):
+        """After migration, STALE must be accepted by the CHECK constraint."""
+        self._create_old_schema()
+        cid = self._insert_old_row(1, 2, 80, "STRONG", "OPEN")
+        self._dd.ensure_schema(self._conn)
+        self._conn.commit()
+        self._conn.execute(
+            "UPDATE listing_duplicate_candidates SET status='STALE' WHERE id=?", (cid,)
+        )
+        self._conn.commit()
+        row = self._conn.execute(
+            "SELECT status FROM listing_duplicate_candidates WHERE id=?", (cid,)
+        ).fetchone()
+        self.assertEqual(row[0], "STALE",
+                         "STALE must be accepted after migration")
+
+    def test_existing_rows_survive_migration(self):
+        """All rows (including operator decisions) must survive reconstruction."""
+        self._create_old_schema()
+        self._insert_old_row(1, 2, 93, "VERY_STRONG", "CONFIRMED_SAME")
+        self._insert_old_row(3, 4, 75, "STRONG", "OPEN")
+        self._insert_old_row(5, 6, 50, "POSSIBLE", "CONFIRMED_DIFFERENT")
+        self._dd.ensure_schema(self._conn)
+        self._conn.commit()
+        rows = self._conn.execute(
+            "SELECT listing_id_a, listing_id_b, score, classification, status "
+            "FROM listing_duplicate_candidates ORDER BY listing_id_a"
+        ).fetchall()
+        self.assertEqual(len(rows), 3, "Row count must be preserved after migration")
+        self.assertEqual(rows[0], (1, 2, 93, "VERY_STRONG", "CONFIRMED_SAME"))
+        self.assertEqual(rows[1], (3, 4, 75, "STRONG", "OPEN"))
+        self.assertEqual(rows[2], (5, 6, 50, "POSSIBLE", "CONFIRMED_DIFFERENT"))
+
+    def test_human_review_survives_migration(self):
+        """operator_comment and reviewed_at (if present pre-migration) must be preserved."""
+        self._create_old_schema()
+        # First run the column migrations so reviewed_at exists before we write to it
+        for m in self._dd._MIGRATIONS:
+            try:
+                self._conn.execute(m)
+            except Exception:
+                pass
+        self._conn.commit()
+        cid = self._insert_old_row(1, 2, 90, "VERY_STRONG", "CONFIRMED_SAME")
+        self._conn.execute(
+            "UPDATE listing_duplicate_candidates SET operator_comment=?, reviewed_at=? WHERE id=?",
+            ("Same dealer confirmed by phone", "2026-08-14T20:00:00", cid),
+        )
+        self._conn.commit()
+        # Now run full ensure_schema (which includes reconstruction)
+        self._dd.ensure_schema(self._conn)
+        self._conn.commit()
+        row = self._conn.execute(
+            "SELECT status, operator_comment, reviewed_at FROM listing_duplicate_candidates WHERE id=?",
+            (cid,),
+        ).fetchone()
+        self.assertEqual(row[0], "CONFIRMED_SAME")
+        self.assertEqual(row[1], "Same dealer confirmed by phone")
+        self.assertEqual(row[2], "2026-08-14T20:00:00")
+
+    def test_ensure_schema_idempotent(self):
+        """Calling ensure_schema twice must produce no error and no data change."""
+        self._create_old_schema()
+        self._insert_old_row(1, 2, 85, "VERY_STRONG", "OPEN")
+        self._dd.ensure_schema(self._conn)
+        self._conn.commit()
+        self._dd.ensure_schema(self._conn)
+        self._conn.commit()
+        cnt = self._conn.execute(
+            "SELECT COUNT(*) FROM listing_duplicate_candidates"
+        ).fetchone()[0]
+        self.assertEqual(cnt, 1, "Row count must be 1 after two ensure_schema calls")
+        sql = self._conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='listing_duplicate_candidates'"
+        ).fetchone()[0]
+        self.assertIn(self._dd._REQUIRED_CHECK, sql,
+                      "CHECK constraint must be correct after second ensure_schema")
+
+    def test_fresh_schema_has_no_old_constraint(self):
+        """A freshly created table must have the full CHECK constraint from _DDL."""
+        # Do NOT call _create_old_schema — let ensure_schema create it fresh
+        self._dd.ensure_schema(self._conn)
+        sql = self._conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='listing_duplicate_candidates'"
+        ).fetchone()[0]
+        self.assertIn(self._dd._REQUIRED_CHECK, sql,
+                      "Fresh schema must include STALE and UNSURE in CHECK constraint")
+
+    def test_next_open_no_wraparound_after_last(self):
+        """get_next_open_candidate called after the last candidate must return None,
+        not wrap to the first."""
+        # Create a source + two listings + two OPEN candidates
+        self._conn.executescript("""
+            INSERT OR IGNORE INTO sources (source_name, display_name) VALUES ('src_a','Source A');
+            INSERT OR IGNORE INTO sources (source_name, display_name) VALUES ('src_b','Source B');
+        """)
+        sid_a = self._conn.execute("SELECT id FROM sources WHERE source_name='src_a'").fetchone()[0]
+        sid_b = self._conn.execute("SELECT id FROM sources WHERE source_name='src_b'").fetchone()[0]
+        for sl_id, url in [("x1","https://a.com/1"),("x2","https://a.com/2")]:
+            self._conn.execute(
+                "INSERT INTO source_listings (source_id, source_listing_id, source_url) VALUES (?,?,?)",
+                (sid_a, sl_id, url),
+            )
+        for sl_id, url in [("y1","https://b.com/1"),("y2","https://b.com/2")]:
+            self._conn.execute(
+                "INSERT INTO source_listings (source_id, source_listing_id, source_url) VALUES (?,?,?)",
+                (sid_b, sl_id, url),
+            )
+        # listings table requires source_listing_row_id; skip snapshot for simplicity
+        for i, (sid, sl_id, price, km) in enumerate([
+            (sid_a, "x1", 30000, 50000),
+            (sid_b, "y1", 30000, 50000),
+        ], 1):
+            sl_row = self._conn.execute(
+                "SELECT id FROM source_listings WHERE source_id=? AND source_listing_id=?",
+                (sid, sl_id),
+            ).fetchone()[0]
+            self._conn.execute(
+                """INSERT INTO listings (source_id, source_listing_id, source_listing_row_id,
+                   current_price, current_mileage, availability)
+                   VALUES (?,?,?,?,?,'ACTIVE')""",
+                (sid, sl_id, sl_row, price, km),
+            )
+        lids = [r[0] for r in self._conn.execute("SELECT id FROM listings ORDER BY id").fetchall()]
+        self._conn.commit()
+        self._dd.ensure_schema(self._conn)
+        self._conn.commit()
+        # Insert one OPEN candidate
+        a, b = min(lids[0], lids[1]), max(lids[0], lids[1])
+        self._conn.execute(
+            """INSERT INTO listing_duplicate_candidates
+               (listing_id_a, listing_id_b, score, classification, evidence, differences,
+                status, created_at, updated_at)
+               VALUES (?,?,85,'VERY_STRONG','[]','[]','OPEN',datetime('now'),datetime('now'))""",
+            (a, b),
+        )
+        self._conn.commit()
+        cid = self._conn.execute(
+            "SELECT id FROM listing_duplicate_candidates WHERE listing_id_a=? AND listing_id_b=?",
+            (a, b),
+        ).fetchone()[0]
+
+        # First call: should return the one OPEN candidate
+        next1 = self._dd.get_next_open_candidate(conn=self._conn)
+        self.assertEqual(next1, cid)
+
+        # After providing after_id=cid, no further OPEN candidates exist
+        next2 = self._dd.get_next_open_candidate(after_id=cid, conn=self._conn)
+        self.assertIsNone(next2,
+                          "get_next_open_candidate must return None after the last OPEN candidate, "
+                          "not wrap to the first")

@@ -64,19 +64,34 @@ CREATE TABLE IF NOT EXISTS listing_duplicate_candidates (
     differences       TEXT NOT NULL DEFAULT '[]',
     status            TEXT NOT NULL DEFAULT 'OPEN',
     last_evaluated_at TEXT,
+    operator_comment  TEXT,
+    reviewed_at       TEXT,
     created_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(listing_id_a, listing_id_b),
     FOREIGN KEY (listing_id_a) REFERENCES listings(id),
     FOREIGN KEY (listing_id_b) REFERENCES listings(id),
     CHECK (listing_id_a < listing_id_b),
-    CHECK (status IN ('OPEN','CONFIRMED_SAME','CONFIRMED_DIFFERENT','DISMISSED','STALE'))
+    CHECK (status IN ('OPEN','CONFIRMED_SAME','CONFIRMED_DIFFERENT','UNSURE','DISMISSED','STALE'))
 );
 CREATE INDEX IF NOT EXISTS idx_ldc_status
     ON listing_duplicate_candidates(status);
 CREATE INDEX IF NOT EXISTS idx_ldc_classification
     ON listing_duplicate_candidates(classification, score DESC);
 """
+
+# Columns added after initial schema deployment — applied by ensure_schema().
+# These handle the case where a database was initially created with _DDL but
+# before these columns existed.  The CHECK constraint update is handled by
+# _migrate_check_constraint() below.
+_MIGRATIONS = [
+    "ALTER TABLE listing_duplicate_candidates ADD COLUMN last_evaluated_at TEXT",
+    "ALTER TABLE listing_duplicate_candidates ADD COLUMN operator_comment TEXT",
+    "ALTER TABLE listing_duplicate_candidates ADD COLUMN reviewed_at TEXT",
+]
+
+# The new CHECK constraint that must be present for STALE and UNSURE to work.
+_REQUIRED_CHECK = "('OPEN','CONFIRMED_SAME','CONFIRMED_DIFFERENT','UNSURE','DISMISSED','STALE')"
 
 # ---------------------------------------------------------------------------
 # Scoring weights
@@ -559,14 +574,97 @@ def generate_candidates(conn) -> list[tuple[dict, dict]]:
 # ---------------------------------------------------------------------------
 
 def ensure_schema(conn) -> None:
-    """Create detection tables and indexes if they do not exist.
+    """Create detection tables and indexes if they do not exist, then apply
+    any pending schema migrations.
 
-    Does NOT commit; the caller controls the transaction.  When called
-    from run_detection with an internally-owned connection the commit
-    happens naturally; when called with an external connection the caller
-    remains in control.
+    Does NOT commit; the caller controls the transaction.
+
+    Migration strategy
+    ------------------
+    SQLite does not support ALTER TABLE … MODIFY CONSTRAINT, so updating a
+    CHECK constraint requires the standard rename-create-copy-drop approach.
+    We detect the old constraint by inspecting sqlite_master and, if found,
+    perform a transaction-safe table reconstruction that preserves every
+    existing row, operator decision, and timestamp.
+
+    After reconstruction, additive column migrations (ALTER TABLE ADD COLUMN)
+    are applied idempotently for the remaining new columns.
+
+    All operations are idempotent: calling ensure_schema() twice in a row is
+    safe and produces no side effects.
     """
+    # ── 1. Create table if it does not exist yet ────────────────────────────
     for stmt in _DDL.strip().split(";"):
+        stmt = stmt.strip()
+        if stmt:
+            conn.execute(stmt)
+
+    # ── 2. Migrate CHECK constraint if the old (incomplete) one is present ──
+    _migrate_check_constraint(conn)
+
+    # ── 3. Additive column migrations (idempotent) ──────────────────────────
+    for migration in _MIGRATIONS:
+        try:
+            conn.execute(migration)
+        except Exception:
+            pass  # column already exists
+
+
+def _migrate_check_constraint(conn) -> None:
+    """
+    If listing_duplicate_candidates has the old CHECK constraint that lacks
+    STALE and UNSURE, reconstruct the table in-place preserving all data.
+
+    The reconstruction uses SQLite's recommended rename-copy-drop pattern:
+      1. Rename old table to _ldc_old
+      2. Create new table with correct schema
+      3. Copy all columns common to both schemas
+      4. Drop old table
+      5. Recreate indexes (CREATE INDEX IF NOT EXISTS is a no-op if present)
+
+    The entire operation is run within the caller's transaction so a failure
+    leaves the database unchanged.
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='listing_duplicate_candidates'"
+    ).fetchone()
+    if row is None:
+        return  # table does not exist yet — DDL above will create it fresh
+    existing_sql = row[0] or ""
+    if _REQUIRED_CHECK in existing_sql:
+        return  # already up to date
+
+    # Old table exists with insufficient CHECK — reconstruct it.
+    # Determine which columns currently exist so we copy only known columns.
+    existing_cols = {
+        r[1] for r in conn.execute(
+            "PRAGMA table_info(listing_duplicate_candidates)"
+        ).fetchall()
+    }
+
+    # All columns in the new schema (from _DDL); we copy the intersection.
+    new_cols = [
+        "id", "listing_id_a", "listing_id_b", "score", "classification",
+        "evidence", "differences", "status", "last_evaluated_at",
+        "operator_comment", "reviewed_at", "created_at", "updated_at",
+    ]
+    copy_cols = [c for c in new_cols if c in existing_cols]
+    col_list = ", ".join(copy_cols)
+
+    conn.execute("ALTER TABLE listing_duplicate_candidates RENAME TO _ldc_old")
+
+    # Create fresh table with new schema (DDL already split above; we re-run
+    # just the CREATE TABLE statement).
+    create_stmt = _DDL.strip().split(";")[0].strip()
+    conn.execute(create_stmt)
+
+    # Copy all rows from old table; columns absent in old schema default to NULL.
+    conn.execute(f"INSERT INTO listing_duplicate_candidates ({col_list}) SELECT {col_list} FROM _ldc_old")
+
+    conn.execute("DROP TABLE _ldc_old")
+
+    # Recreate indexes (IF NOT EXISTS makes this a no-op when already present).
+    for stmt in _DDL.strip().split(";")[1:]:
         stmt = stmt.strip()
         if stmt:
             conn.execute(stmt)
@@ -726,3 +824,298 @@ def score_listing_pair(listing_id_a: int, listing_id_b: int, *, conn=None) -> di
     finally:
         if should_close:
             conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Portal DB helpers
+# ---------------------------------------------------------------------------
+
+# Status values that represent operator review decisions
+REVIEWED_STATUSES = {"CONFIRMED_SAME", "CONFIRMED_DIFFERENT", "UNSURE", "DISMISSED"}
+# Status values that belong in the active review queue
+REVIEWABLE_STATUSES = {"OPEN", "STALE"}
+# Classifications shown by default in the review queue (LOW excluded)
+DEFAULT_CLASSIFICATIONS = {"VERY_STRONG", "STRONG", "POSSIBLE"}
+
+
+def _listing_detail(listing_id: int, conn) -> dict[str, Any]:
+    """Return a display dict for a single listing including source metadata."""
+    row = conn.execute(
+        """
+        SELECT l.id, l.source_id, s.display_name, l.source_listing_id,
+               l.current_price, l.current_mileage, l.current_seller,
+               l.current_description, l.current_options,
+               sl.source_url
+        FROM listings l
+        JOIN sources s ON s.id = l.source_id
+        JOIN source_listings sl ON sl.id = l.source_listing_row_id
+        WHERE l.id = ?
+        """,
+        (listing_id,),
+    ).fetchone()
+    if row is None:
+        return {}
+    lid, source_id, source_label, source_listing_id, price, mileage, seller, desc, options, url = row
+    snap = _get_snapshot_fields(lid, conn)
+    return {
+        "id": lid,
+        "source_id": source_id,
+        "source_label": source_label or f"Source {source_id}",
+        "source_listing_id": source_listing_id,
+        "source_url": url,
+        "price": price,
+        "mileage": mileage,
+        "seller": seller,
+        "description": desc,
+        "title": snap.get("title"),
+        "year": snap.get("year") or (snap.get("first_registration") or "")[:4] or None,
+        "first_registration": snap.get("first_registration"),
+        "colour": snap.get("colour") or snap.get("color"),
+        "power_hp": snap.get("power_hp") or snap.get("hp"),
+        "drivetrain": snap.get("drivetrain") or snap.get("drive"),
+        "transmission": snap.get("transmission") or snap.get("gearbox"),
+        "vin": snap.get("vin"),
+    }
+
+
+def get_duplicate_candidates(
+    *,
+    classification: str | None = None,
+    status: str | None = None,
+    conn=None,
+) -> list[dict[str, Any]]:
+    """
+    Return candidate rows for the review portal.
+
+    classification: one of VERY_STRONG/STRONG/POSSIBLE/LOW, or None for all
+                    reviewable (excludes LOW by default when None).
+    status:         specific status filter, or None for OPEN only.
+    """
+    should_close = conn is None
+    conn = conn or database.get_connection()
+    try:
+        ensure_schema(conn)
+        conn.commit()
+
+        clauses = []
+        params: list = []
+
+        if classification:
+            clauses.append("ldc.classification = ?")
+            params.append(classification)
+        else:
+            # Default: exclude LOW
+            placeholders = ",".join("?" for _ in DEFAULT_CLASSIFICATIONS)
+            clauses.append(f"ldc.classification IN ({placeholders})")
+            params.extend(sorted(DEFAULT_CLASSIFICATIONS))
+
+        if status:
+            clauses.append("ldc.status = ?")
+            params.append(status)
+        else:
+            clauses.append("ldc.status = 'OPEN'")
+
+        where = "WHERE " + " AND ".join(clauses) if clauses else ""
+
+        rows = conn.execute(
+            f"""
+            SELECT ldc.id, ldc.listing_id_a, ldc.listing_id_b,
+                   ldc.score, ldc.classification, ldc.evidence, ldc.differences,
+                   ldc.status, ldc.operator_comment, ldc.reviewed_at, ldc.updated_at
+            FROM listing_duplicate_candidates ldc
+            {where}
+            ORDER BY
+                CASE ldc.classification
+                    WHEN 'VERY_STRONG' THEN 1
+                    WHEN 'STRONG'      THEN 2
+                    WHEN 'POSSIBLE'    THEN 3
+                    ELSE 4
+                END,
+                ldc.score DESC
+            """,
+            params,
+        ).fetchall()
+
+        return [_row_to_candidate(r) for r in rows]
+    finally:
+        if should_close:
+            conn.close()
+
+
+def get_duplicate_candidate(candidate_id: int, *, conn=None) -> dict[str, Any] | None:
+    """Return a single candidate with full listing details for the detail/review page."""
+    should_close = conn is None
+    conn = conn or database.get_connection()
+    try:
+        ensure_schema(conn)
+        conn.commit()
+
+        row = conn.execute(
+            """
+            SELECT ldc.id, ldc.listing_id_a, ldc.listing_id_b,
+                   ldc.score, ldc.classification, ldc.evidence, ldc.differences,
+                   ldc.status, ldc.operator_comment, ldc.reviewed_at, ldc.updated_at
+            FROM listing_duplicate_candidates ldc
+            WHERE ldc.id = ?
+            """,
+            (candidate_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        candidate = _row_to_candidate(row)
+        candidate["listing_a"] = _listing_detail(candidate["listing_id_a"], conn)
+        candidate["listing_b"] = _listing_detail(candidate["listing_id_b"], conn)
+        return candidate
+    finally:
+        if should_close:
+            conn.close()
+
+
+def get_next_open_candidate(after_id: int | None = None, *, conn=None) -> int | None:
+    """Return the id of the next OPEN VERY_STRONG/STRONG/POSSIBLE candidate.
+
+    If after_id is given, returns the next one after that candidate (by sort
+    order).  Returns None when the queue is empty.
+    """
+    should_close = conn is None
+    conn = conn or database.get_connection()
+    try:
+        ensure_schema(conn)
+        conn.commit()
+
+        order_expr = """
+            CASE classification
+                WHEN 'VERY_STRONG' THEN 1
+                WHEN 'STRONG'      THEN 2
+                WHEN 'POSSIBLE'    THEN 3
+                ELSE 4
+            END, score DESC, id ASC
+        """
+        placeholders = ",".join("?" for _ in DEFAULT_CLASSIFICATIONS)
+        base_where = f"status = 'OPEN' AND classification IN ({placeholders})"
+        base_params = list(sorted(DEFAULT_CLASSIFICATIONS))
+
+        if after_id is not None:
+            # Fetch current row's sort key to find what comes after it
+            cur = conn.execute(
+                "SELECT classification, score, id FROM listing_duplicate_candidates WHERE id=?",
+                (after_id,),
+            ).fetchone()
+            if cur:
+                cls_map = {"VERY_STRONG": 1, "STRONG": 2, "POSSIBLE": 3}
+                cur_rank = cls_map.get(cur[0], 4)
+                cur_score = cur[1]
+                cur_id = cur[2]
+                row = conn.execute(
+                    f"""
+                    SELECT id FROM listing_duplicate_candidates
+                    WHERE {base_where}
+                      AND (
+                        CASE classification WHEN 'VERY_STRONG' THEN 1 WHEN 'STRONG' THEN 2
+                             WHEN 'POSSIBLE' THEN 3 ELSE 4 END > ?
+                        OR (CASE classification WHEN 'VERY_STRONG' THEN 1 WHEN 'STRONG' THEN 2
+                             WHEN 'POSSIBLE' THEN 3 ELSE 4 END = ? AND score < ?)
+                        OR (CASE classification WHEN 'VERY_STRONG' THEN 1 WHEN 'STRONG' THEN 2
+                             WHEN 'POSSIBLE' THEN 3 ELSE 4 END = ? AND score = ? AND id > ?)
+                      )
+                    ORDER BY {order_expr}
+                    LIMIT 1
+                    """,
+                    base_params + [cur_rank, cur_rank, cur_score, cur_rank, cur_score, cur_id],
+                ).fetchone()
+                # Return the next candidate, or None if after_id was the last one.
+                # Never wrap around to the first candidate when after_id is specified.
+                return row[0] if row else None
+
+        # No after_id: return the first OPEN candidate in sort order.
+        row = conn.execute(
+            f"SELECT id FROM listing_duplicate_candidates WHERE {base_where} ORDER BY {order_expr} LIMIT 1",
+            base_params,
+        ).fetchone()
+        return row[0] if row else None
+    finally:
+        if should_close:
+            conn.close()
+
+
+def update_duplicate_candidate_review(
+    candidate_id: int,
+    *,
+    status: str,
+    operator_comment: str | None = None,
+    conn=None,
+) -> None:
+    """
+    Persist an operator review decision.
+
+    SAFETY CONTRACT:
+    - Only listing_duplicate_candidates is modified.
+    - listings.vehicle_id is never touched.
+    - No Vehicle is created or merged.
+    - CONFIRMED_SAME means "human believes same physical vehicle" — not an
+      automatic vehicle merge.  Vehicle resolution remains a separate step.
+    """
+    valid = {"CONFIRMED_SAME", "CONFIRMED_DIFFERENT", "UNSURE", "DISMISSED", "OPEN"}
+    if status not in valid:
+        raise ValueError(f"Invalid review status: {status!r}")
+    should_close = conn is None
+    conn = conn or database.get_connection()
+    try:
+        now = datetime.now().isoformat()
+        conn.execute(
+            """
+            UPDATE listing_duplicate_candidates
+            SET status=?, operator_comment=?, reviewed_at=?, updated_at=?
+            WHERE id=?
+            """,
+            (status, operator_comment or None, now, now, candidate_id),
+        )
+        conn.commit()
+    finally:
+        if should_close:
+            conn.close()
+
+
+def get_review_summary(*, conn=None) -> dict[str, int]:
+    """Return counts by status for the review progress summary."""
+    should_close = conn is None
+    conn = conn or database.get_connection()
+    try:
+        ensure_schema(conn)
+        conn.commit()
+        rows = conn.execute(
+            """
+            SELECT status, COUNT(*) FROM listing_duplicate_candidates
+            WHERE classification IN ('VERY_STRONG','STRONG','POSSIBLE')
+            GROUP BY status
+            """
+        ).fetchall()
+        return {r[0]: r[1] for r in rows}
+    finally:
+        if should_close:
+            conn.close()
+
+
+def _row_to_candidate(row) -> dict[str, Any]:
+    cid, lid_a, lid_b, score, classification, evidence_json, diff_json, status, comment, reviewed_at, updated_at = row
+    try:
+        evidence = json.loads(evidence_json) if evidence_json else []
+    except (ValueError, TypeError):
+        evidence = []
+    try:
+        differences = json.loads(diff_json) if diff_json else []
+    except (ValueError, TypeError):
+        differences = []
+    return {
+        "id": cid,
+        "listing_id_a": lid_a,
+        "listing_id_b": lid_b,
+        "score": score,
+        "classification": classification,
+        "evidence": evidence,
+        "differences": differences,
+        "status": status,
+        "operator_comment": comment,
+        "reviewed_at": reviewed_at,
+        "updated_at": updated_at,
+    }

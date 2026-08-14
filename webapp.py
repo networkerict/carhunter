@@ -272,6 +272,75 @@ def deals():
         cars=cars
     )
 
+@app.route("/duplicates")
+def duplicates_list():
+    from flask import request
+    import duplicate_detection as dd
+
+    classification = request.args.get("classification") or None
+    status = request.args.get("status") or None
+
+    candidates = dd.get_duplicate_candidates(
+        classification=classification,
+        status=status,
+    )
+    summary = dd.get_review_summary()
+
+    return render_template(
+        "duplicates.html",
+        candidates=candidates,
+        summary=summary,
+        filter_classification=classification,
+        filter_status=status,
+        view="list",
+    )
+
+
+@app.route("/duplicates/<int:candidate_id>")
+def duplicate_detail(candidate_id):
+    import duplicate_detection as dd
+
+    candidate = dd.get_duplicate_candidate(candidate_id)
+    if candidate is None:
+        return "Candidate not found", 404
+
+    summary = dd.get_review_summary()
+    next_id = dd.get_next_open_candidate(after_id=candidate_id)
+
+    return render_template(
+        "duplicates.html",
+        candidate=candidate,
+        summary=summary,
+        next_id=next_id,
+        view="detail",
+    )
+
+
+@app.route("/duplicates/<int:candidate_id>/review", methods=["POST"])
+def duplicate_review(candidate_id):
+    from flask import request
+    import duplicate_detection as dd
+
+    status = request.form.get("status")
+    comment = request.form.get("operator_comment", "").strip() or None
+
+    allowed = {"CONFIRMED_SAME", "CONFIRMED_DIFFERENT", "UNSURE", "DISMISSED", "OPEN"}
+    if status not in allowed:
+        return "Invalid status", 400
+
+    dd.update_duplicate_candidate_review(
+        candidate_id,
+        status=status,
+        operator_comment=comment,
+    )
+
+    # Navigate to next OPEN candidate, or back to list
+    next_id = dd.get_next_open_candidate(after_id=candidate_id)
+    if next_id:
+        return redirect(f"/duplicates/{next_id}")
+    return redirect("/duplicates")
+
+
 @app.route("/rescore")
 def rescore():
 
