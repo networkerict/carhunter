@@ -40,6 +40,7 @@ def get_dashboard_data():
 
     stats = pipeline_stats.get_pipeline_stats()
     inventory = database.get_inventory_counts()
+    source_counts = database.get_source_counts()
 
     latest_run = pipeline_stats.get_latest_run()
 
@@ -61,6 +62,7 @@ def get_dashboard_data():
         "deals": deals,
         "stats": stats,
         "inventory": inventory,
+        "source_counts": source_counts,
         "latest_run": latest_run,
         "recent_runs": recent_runs,
         "recommendations": recommendations

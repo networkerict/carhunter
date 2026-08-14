@@ -61,6 +61,105 @@ def test_connection():
 
     connection.close()
 
+def update_source_display_name(source_name: str, display_name: str) -> None:
+    """Idempotently update sources.display_name from adapter descriptor metadata.
+
+    Called by the source registry at build time so the table always reflects
+    the human-readable label each adapter declares.  No-ops when the row does
+    not yet exist (it will be created on the first snapshot write).
+    """
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            UPDATE sources
+            SET display_name = ?
+            WHERE source_name = ?
+              AND display_name != ?
+            """,
+            (display_name, source_name, display_name),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _build_source_url_map(conn):
+    """Return {source_url: (source_name, display_label)} for all source_listings.
+
+    Uses sources.display_name as the authoritative label.  Falls back to
+    source_name when display_name is absent or still equals source_name (i.e.
+    not yet synced by the registry).
+    """
+    rows = conn.execute(
+        """
+        SELECT sl.source_url, s.source_name, s.display_name
+        FROM source_listings sl
+        JOIN sources s ON s.id = sl.source_id
+        """
+    ).fetchall()
+    result = {}
+    for source_url, source_name, display_name in rows:
+        if source_url:
+            label = display_name if (display_name and display_name != source_name) else source_name
+            result[source_url] = (source_name, label)
+    return result
+
+
+def _enrich_car_with_source(car, source_map):
+    """Attach source_name and source_label to a Car object.
+
+    Resolves source via cars.url -> source_listings.source_url -> sources.
+    Falls back safely for rows with no resolvable URL.
+    """
+    car.source_name = None
+    car.source_label = "Listing"
+    url = getattr(car, "url", None)
+    if url:
+        src = source_map.get(url)
+        if src:
+            car.source_name = src[0]
+            car.source_label = src[1]
+    return car
+
+
+def _enrich_cars(cars, conn):
+    """Enrich a list of Car objects with source_name and source_label in one pass."""
+    source_map = _build_source_url_map(conn)
+    for car in cars:
+        _enrich_car_with_source(car, source_map)
+    return cars
+
+
+def get_source_counts():
+    """Return active portal inventory counts grouped by source.
+
+    Only counts cars with sold=0 (active portal inventory).
+    Uses sources.display_name as the label; falls back to source_name.
+    Cars whose URL cannot be resolved to a source are excluded from counts.
+    """
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT s.source_name, s.display_name, COUNT(c.id) AS cnt
+            FROM cars c
+            JOIN source_listings sl ON sl.source_url = c.url
+            JOIN sources s ON s.id = sl.source_id
+            WHERE COALESCE(c.sold, 0) = 0
+            GROUP BY s.source_name, s.display_name
+            ORDER BY cnt DESC
+            """
+        ).fetchall()
+        result = {}
+        for source_name, display_name, cnt in rows:
+            label = display_name if (display_name and display_name != source_name) else source_name
+            result[label] = cnt
+        return result
+    finally:
+        conn.close()
+
+
 def get_car(car_id):
 
     connection = get_connection()
@@ -78,20 +177,21 @@ def get_car(car_id):
 
     car = cursor.fetchone()
 
-    connection.close()
-
     if car:
         debug.info(
             f"Car found: {car[3]}"
         )
-
-        return Car(car)
+        result = Car(car)
+        source_map = _build_source_url_map(connection)
+        _enrich_car_with_source(result, source_map)
+        connection.close()
+        return result
 
     else:
+        connection.close()
         debug.warning(
             f"Car not found: {car_id}"
         )
-
         return None
 
 def car_exists(fingerprint):
@@ -1777,12 +1877,10 @@ def get_todays_cars(limit=20):
         (limit,)
     ).fetchall()
 
+    cars = [Car(row) for row in rows]
+    _enrich_cars(cars, conn)
     conn.close()
-
-    return [
-        Car(row)
-        for row in rows
-    ]
+    return cars
 
 
 
@@ -1808,12 +1906,10 @@ def get_recent_cars(days=7, limit=20):
         )
     ).fetchall()
 
+    cars = [Car(row) for row in rows]
+    _enrich_cars(cars, conn)
     conn.close()
-
-    return [
-        Car(row)
-        for row in rows
-    ]
+    return cars
 
 
 def get_ranked_cars(limit=10):
@@ -1832,12 +1928,10 @@ def get_ranked_cars(limit=10):
         (limit,)
     ).fetchall()
 
+    cars = [Car(row) for row in rows]
+    _enrich_cars(cars, conn)
     conn.close()
-
-    return [
-        Car(row)
-        for row in rows
-    ]
+    return cars
 
 
 def get_recommendation_candidates(limit=5):
@@ -1884,13 +1978,10 @@ def get_ranking(limit=10):
     )
 
     rows = cursor.fetchall()
-
+    cars = [Car(row) for row in rows]
+    _enrich_cars(cars, connection)
     connection.close()
-
-    return [
-        Car(row)
-        for row in rows
-    ]
+    return cars
 
 
 
@@ -2003,16 +2094,11 @@ def search_cars(
         params
     ).fetchall()
 
-
-    conn.close()
-
-
     from models import Car
-
-    return [
-        Car(row)
-        for row in rows
-    ]
+    cars = [Car(row) for row in rows]
+    _enrich_cars(cars, conn)
+    conn.close()
+    return cars
 
 
 def get_inventory_counts():
@@ -2189,12 +2275,10 @@ def get_deals(limit=20):
         )
     ).fetchall()
 
+    cars = [Car(row) for row in rows]
+    _enrich_cars(cars, conn)
     conn.close()
-
-    return [
-        Car(row)
-        for row in rows
-    ]
+    return cars
 
 
 def get_unsent_watchlist_matches():

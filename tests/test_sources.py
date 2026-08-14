@@ -2424,3 +2424,165 @@ class TestPkwDeCanonicalPersistence:
                 conn.close()
         finally:
             config.DATABASE = orig
+
+
+# ---------------------------------------------------------------------------
+# Portal source-identity tests
+# ---------------------------------------------------------------------------
+
+class TestPortalSourceIdentity(unittest.TestCase):
+    """Tests for source_name / source_label enrichment in portal Car objects."""
+
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.orig_db = config.DATABASE
+        config.DATABASE = os.path.join(self.tempdir.name, "portal_test.db")
+        conn = database.get_connection()
+        conn.close()
+        # Insert two sources
+        conn = database.get_connection()
+        conn.execute(
+            "INSERT OR IGNORE INTO sources (source_name, display_name) VALUES (?, ?)",
+            ("autoscout24", "AutoScout24"),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO sources (source_name, display_name) VALUES (?, ?)",
+            ("pkw_de", "PKW.de"),
+        )
+        conn.commit()
+        # Get source ids
+        as24_id = conn.execute("SELECT id FROM sources WHERE source_name='autoscout24'").fetchone()[0]
+        pkw_id = conn.execute("SELECT id FROM sources WHERE source_name='pkw_de'").fetchone()[0]
+        # Insert source_listings
+        conn.execute(
+            "INSERT INTO source_listings (source_id, source_listing_id, source_url) VALUES (?, ?, ?)",
+            (as24_id, "as24-1", "https://www.autoscout24.de/angebote/as24-1"),
+        )
+        conn.execute(
+            "INSERT INTO source_listings (source_id, source_listing_id, source_url) VALUES (?, ?, ?)",
+            (pkw_id, "pkw-1", "https://suche.pkw.de/fahrzeuge/details/pkw-1"),
+        )
+        conn.commit()
+        now = _datetime.now().isoformat()
+        # Insert cars referencing those URLs
+        conn.execute(
+            "INSERT INTO cars (title, price, km, url, first_seen, last_seen, final_score, personal_score, sold) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("Audi A5 AutoScout24", 30000, 50000, "https://www.autoscout24.de/angebote/as24-1", now, now, 70, 0, 0),
+        )
+        conn.execute(
+            "INSERT INTO cars (title, price, km, url, first_seen, last_seen, final_score, personal_score, sold) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("Audi A5 PKW.de", 28000, 35000, "https://suche.pkw.de/fahrzeuge/details/pkw-1", now, now, 65, 0, 0),
+        )
+        # A car with no resolvable source (legacy / pre-fix row with no url)
+        conn.execute(
+            "INSERT INTO cars (title, price, km, url, first_seen, last_seen, final_score, personal_score, sold) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("Audi A5 Unknown", 20000, None, None, now, now, 40, 0, 0),
+        )
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        config.DATABASE = self.orig_db
+        self.tempdir.cleanup()
+
+    def test_autoscout24_car_source_label(self):
+        cars = database.get_ranking(limit=10)
+        as24 = next((c for c in cars if "AutoScout24" in c.title), None)
+        self.assertIsNotNone(as24)
+        self.assertEqual(as24.source_name, "autoscout24")
+        self.assertEqual(as24.source_label, "AutoScout24")
+
+    def test_pkw_de_car_source_label(self):
+        cars = database.get_ranking(limit=10)
+        pkw = next((c for c in cars if "PKW.de" in c.title), None)
+        self.assertIsNotNone(pkw)
+        self.assertEqual(pkw.source_name, "pkw_de")
+        self.assertEqual(pkw.source_label, "PKW.de")
+
+    def test_unknown_source_fallback(self):
+        cars = database.get_ranking(limit=10)
+        unknown = next((c for c in cars if "Unknown" in c.title), None)
+        self.assertIsNotNone(unknown)
+        self.assertIsNone(unknown.source_name)
+        self.assertEqual(unknown.source_label, "Listing")
+
+    def test_no_duplicate_rows_from_enrichment(self):
+        """Enrichment must not multiply Car rows."""
+        cars = database.get_ranking(limit=10)
+        self.assertEqual(len(cars), 3)
+
+    def test_ranking_contains_both_sources(self):
+        cars = database.get_ranking(limit=10)
+        source_labels = {c.source_label for c in cars}
+        self.assertIn("AutoScout24", source_labels)
+        self.assertIn("PKW.de", source_labels)
+
+    def test_get_car_enriched(self):
+        """get_car() must enrich the single result with source identity."""
+        conn = database.get_connection()
+        row = conn.execute("SELECT id FROM cars WHERE title='Audi A5 AutoScout24'").fetchone()
+        conn.close()
+        car = database.get_car(row[0])
+        self.assertEqual(car.source_name, "autoscout24")
+        self.assertEqual(car.source_label, "AutoScout24")
+
+    def test_search_cars_enriched(self):
+        cars = database.search_cars()
+        as24 = next((c for c in cars if "AutoScout24" in c.title), None)
+        self.assertIsNotNone(as24)
+        self.assertEqual(as24.source_label, "AutoScout24")
+
+    def test_source_counts_both_sources(self):
+        counts = database.get_source_counts()
+        self.assertIn("AutoScout24", counts)
+        self.assertIn("PKW.de", counts)
+        self.assertEqual(counts["AutoScout24"], 1)
+        self.assertEqual(counts["PKW.de"], 1)
+
+    def test_source_counts_excludes_sold(self):
+        """Sold cars must not appear in source_counts."""
+        conn = database.get_connection()
+        conn.execute("UPDATE cars SET sold=1 WHERE title='Audi A5 AutoScout24'")
+        conn.commit()
+        conn.close()
+        counts = database.get_source_counts()
+        self.assertEqual(counts.get("AutoScout24", 0), 0)
+        self.assertEqual(counts.get("PKW.de", 1), 1)
+
+    def test_source_counts_does_not_hardcode_source_names(self):
+        """Source counts must be driven by DB metadata, not hard-coded keys."""
+        # Add a third fictional source and verify it appears automatically
+        conn = database.get_connection()
+        conn.execute(
+            "INSERT INTO sources (source_name, display_name) VALUES (?, ?)",
+            ("future_source", "FutureAuto"),
+        )
+        future_id = conn.execute("SELECT id FROM sources WHERE source_name='future_source'").fetchone()[0]
+        conn.execute(
+            "INSERT INTO source_listings (source_id, source_listing_id, source_url) VALUES (?, ?, ?)",
+            (future_id, "fa-1", "https://futureauto.example.com/listing/1"),
+        )
+        now = _datetime.now().isoformat()
+        conn.execute(
+            "INSERT INTO cars (title, url, first_seen, last_seen, sold, final_score, personal_score) VALUES (?,?,?,?,?,?,?)",
+            ("Future Car", "https://futureauto.example.com/listing/1", now, now, 0, 50, 0),
+        )
+        conn.commit()
+        conn.close()
+        counts = database.get_source_counts()
+        self.assertIn("FutureAuto", counts)
+
+    def test_car_model_source_defaults(self):
+        """A freshly constructed Car from a bare row must have safe source defaults."""
+        import sqlite3 as _sqlite3
+        conn = _sqlite3.connect(config.DATABASE)
+        row = conn.execute("SELECT * FROM cars WHERE title='Audi A5 Unknown'").fetchone()
+        conn.close()
+        from models import Car
+        car = Car(row)
+        # Before enrichment: defaults
+        self.assertIsNone(car.source_name)
+        self.assertEqual(car.source_label, "Listing")
