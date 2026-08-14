@@ -34,7 +34,11 @@ SOURCE_REGISTRY = {
         "enabled": True,
         "max_pages": 10,
         "page_size": 50,
-    }
+    },
+    "pkw_de": {
+        "enabled": True,
+        "max_pages": 20,
+    },
 }
 
 # Source instances configuration
@@ -53,7 +57,13 @@ SOURCE_INSTANCES = {
         "plugin_id": "mobile_de",
         "enabled": True,
         "provenance_identity": "mobile.de",
-    }
+    },
+    "pkw_de_primary": {
+        "source_family": "pkw_de",
+        "plugin_id": "pkw_de",
+        "enabled": True,
+        "provenance_identity": "pkw.de",
+    },
 }
 
 

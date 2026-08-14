@@ -4,6 +4,7 @@ import config
 
 from .autoscout24 import AutoScout24SourceAdapter
 from .mobile_de import MobileDeSourceAdapter
+from .pkw_de import PkwDeSourceAdapter
 from .base import (
     DiscoveredListing,
     DiscoveryRequest,
@@ -45,6 +46,17 @@ def build_default_source_registry() -> SourceRegistry:
             ),
             configuration=mobile_de_config,
             enabled=mobile_de_config.get("enabled", True),
+        )
+
+    # Register PKW.de
+    pkw_de_config = config.SOURCE_REGISTRY.get("pkw_de", {})
+    if pkw_de_config:
+        registry.register(
+            PkwDeSourceAdapter(
+                max_pages=pkw_de_config.get("max_pages", 20),
+            ),
+            configuration=pkw_de_config,
+            enabled=pkw_de_config.get("enabled", True),
         )
     
     return registry
@@ -91,6 +103,7 @@ def build_source_coordinator(registry: SourceRegistry) -> SourceExecutionCoordin
 __all__ = [
     "AutoScout24SourceAdapter",
     "MobileDeSourceAdapter",
+    "PkwDeSourceAdapter",
     "DiscoveredListing",
     "DiscoveryRequest",
     "MultiSourceExecutionResult",
