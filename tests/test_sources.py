@@ -2923,3 +2923,493 @@ class TestPkwDeLegacyDuplicateRepair(unittest.TestCase):
         report = _json.loads(last_report)
         self.assertEqual(run_count_after, run_count_before + 1, "second run must still log")
         self.assertEqual(report["rows_changed"], 0, "second run must change zero rows")
+
+
+# ---------------------------------------------------------------------------
+# Cross-source duplicate detection tests
+# ---------------------------------------------------------------------------
+
+class TestDuplicateDetection(unittest.TestCase):
+    """
+    Regression tests for duplicate_detection.py.
+
+    All tests use isolated temporary databases populated with controlled
+    fixtures — no dependency on live inventory IDs or counts.
+    """
+
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.orig_db = config.DATABASE
+        config.DATABASE = os.path.join(self.tempdir.name, "dup_test.db")
+        database.get_connection().close()
+        import duplicate_detection as _dd
+        self._dd = _dd
+        self._conn = database.get_connection()
+        _dd.ensure_schema(self._conn)
+        self._conn.commit()
+        self._populate_fixtures()
+
+    def tearDown(self):
+        self._conn.close()
+        config.DATABASE = self.orig_db
+        self.tempdir.cleanup()
+
+    # ── fixture helpers ────────────────────────────────────────────────────
+
+    def _add_source(self, name, display_name=None):
+        self._conn.execute(
+            "INSERT OR IGNORE INTO sources (source_name, display_name) VALUES (?,?)",
+            (name, display_name or name),
+        )
+        return self._conn.execute("SELECT id FROM sources WHERE source_name=?", (name,)).fetchone()[0]
+
+    def _add_source_listing(self, source_id, listing_id, url):
+        self._conn.execute(
+            "INSERT INTO source_listings (source_id, source_listing_id, source_url) VALUES (?,?,?)",
+            (source_id, listing_id, url),
+        )
+        return self._conn.execute(
+            "SELECT id FROM source_listings WHERE source_id=? AND source_listing_id=?",
+            (source_id, listing_id),
+        ).fetchone()[0]
+
+    def _add_snapshot(self, source_id, listing_id, fields: dict):
+        import json as _json
+        sl_row = self._conn.execute(
+            "SELECT id FROM source_listings WHERE source_id=? AND source_listing_id=?",
+            (source_id, listing_id),
+        ).fetchone()
+        sl_id = sl_row[0]
+        snap_hash = f"hash-{listing_id}-{source_id}"
+        self._conn.execute(
+            """INSERT OR IGNORE INTO source_snapshots
+               (source_id, source_listing_id, snapshot_hash, extracted_fields, discovered_at, fetched_at)
+               VALUES (?,?,?,?,datetime('now'),datetime('now'))""",
+            (source_id, listing_id, snap_hash, _json.dumps(fields)),
+        )
+        return self._conn.execute(
+            "SELECT id FROM source_snapshots WHERE source_id=? AND source_listing_id=?",
+            (source_id, listing_id),
+        ).fetchone()[0]
+
+    def _add_listing(self, source_id, source_listing_id, sl_row_id, snap_id,
+                     price, mileage, seller, description=None, options=None):
+        self._conn.execute(
+            """INSERT INTO listings
+               (source_id, source_listing_id, source_listing_row_id,
+                current_price, current_mileage, current_seller,
+                current_description, current_options,
+                latest_source_snapshot_id, availability)
+               VALUES (?,?,?,?,?,?,?,?,?,'ACTIVE')""",
+            (source_id, source_listing_id, sl_row_id,
+             price, mileage, seller, description, options, snap_id),
+        )
+        return self._conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    def _populate_fixtures(self):
+        """Build a minimal cross-source fixture set."""
+        sid_as24 = self._add_source("autoscout24", "AutoScout24")
+        sid_pkw  = self._add_source("pkw_de", "PKW.de")
+        self.sid_as24 = sid_as24
+        self.sid_pkw  = sid_pkw
+
+        # ── Pair A: exact duplicate (same vehicle on two sources) ───────────
+        sl_a1 = self._add_source_listing(sid_as24, "as24-dup-1",
+                                         "https://www.autoscout24.de/angebote/as24-dup-1")
+        snap_a1 = self._add_snapshot(sid_as24, "as24-dup-1", {
+            "title": "Audi A5 45 TFSI",
+            "price": 47650, "km": 19500, "year": 2024,
+            "hp": 265, "drive": "Allrad", "gearbox": "Automatik",
+            "color": "grau",
+        })
+        self.lid_a1 = self._add_listing(
+            sid_as24, "as24-dup-1", sl_a1, snap_a1,
+            47650, 19500,
+            "Autocenter Neuss GmbH & Co. KG",
+        )
+
+        sl_p1 = self._add_source_listing(sid_pkw, "pkw-dup-1",
+                                         "https://suche.pkw.de/fahrzeuge/details/pkw-dup-1")
+        snap_p1 = self._add_snapshot(sid_pkw, "pkw-dup-1", {
+            "title": "Audi A5 Cabriolet 45 TFSI quattro S line ACC+RFK+NAVI",
+            "price": 47650, "mileage": 19500, "year": 2024,
+            "first_registration": "2024-08-01",
+            "power_hp": 265, "drivetrain": "AWD", "transmission": "Automatik",
+            "colour": "grau", "seller_name": "AUTOCENTER NEUSS GmbH & Co. KG",
+        })
+        self.lid_p1 = self._add_listing(
+            sid_pkw, "pkw-dup-1", sl_p1, snap_p1,
+            47650, 19500,
+            "AUTOCENTER NEUSS GmbH & Co. KG",
+            description="Long description with equipment list ACC NAVI Matrix LED Sportsitze",
+        )
+
+        # ── Pair B: same model/year but clearly different (mileage/price diff) ──
+        sl_a2 = self._add_source_listing(sid_as24, "as24-diff-2",
+                                         "https://www.autoscout24.de/angebote/as24-diff-2")
+        snap_a2 = self._add_snapshot(sid_as24, "as24-diff-2", {
+            "title": "Audi A5 45 TFSI", "price": 47650, "km": 75000,
+            "year": 2024, "hp": 265, "drive": "Allrad", "gearbox": "Automatik",
+        })
+        self.lid_a2 = self._add_listing(
+            sid_as24, "as24-diff-2", sl_a2, snap_a2,
+            47650, 75000, "Another Dealer AG",
+        )
+
+        sl_p2 = self._add_source_listing(sid_pkw, "pkw-diff-2",
+                                         "https://suche.pkw.de/fahrzeuge/details/pkw-diff-2")
+        snap_p2 = self._add_snapshot(sid_pkw, "pkw-diff-2", {
+            "title": "Audi A5 Cabriolet 45 TFSI S line", "price": 47650,
+            "mileage": 19500, "year": 2024, "power_hp": 265,
+            "seller_name": "Autohaus Schmidt",
+        })
+        self.lid_p2 = self._add_listing(
+            sid_pkw, "pkw-diff-2", sl_p2, snap_p2,
+            47650, 19500, "Autohaus Schmidt",
+        )
+
+        # ── Pair C: conflicting VIN ─────────────────────────────────────────
+        sl_a3 = self._add_source_listing(sid_as24, "as24-vin-3",
+                                         "https://www.autoscout24.de/angebote/as24-vin-3")
+        snap_a3 = self._add_snapshot(sid_as24, "as24-vin-3", {
+            "title": "Audi A5 40 TFSI", "price": 35000, "km": 50000,
+            "year": 2022, "vin": "WAUZZZ8T0PA000001",
+        })
+        self.lid_a3 = self._add_listing(
+            sid_as24, "as24-vin-3", sl_a3, snap_a3,
+            35000, 50000, "Dealer One",
+        )
+
+        sl_p3 = self._add_source_listing(sid_pkw, "pkw-vin-3",
+                                         "https://suche.pkw.de/fahrzeuge/details/pkw-vin-3")
+        snap_p3 = self._add_snapshot(sid_pkw, "pkw-vin-3", {
+            "title": "Audi A5 40 TFSI", "price": 35000, "mileage": 50000,
+            "year": 2022, "vin": "WAUZZZ8T0PA999999",
+        })
+        self.lid_p3 = self._add_listing(
+            sid_pkw, "pkw-vin-3", sl_p3, snap_p3,
+            35000, 50000, "Dealer One",
+        )
+
+        # ── Pair D: same source (must be ignored) ──────────────────────────
+        sl_a4 = self._add_source_listing(sid_as24, "as24-same-4",
+                                         "https://www.autoscout24.de/angebote/as24-same-4")
+        snap_a4 = self._add_snapshot(sid_as24, "as24-same-4", {
+            "title": "Audi A5 45 TFSI", "price": 47650, "km": 19500, "year": 2024,
+        })
+        self.lid_a4 = self._add_listing(
+            sid_as24, "as24-same-4", sl_a4, snap_a4,
+            47650, 19500, "Autocenter Neuss GmbH",
+        )
+
+        # ── Pair E: same title but different seller ─────────────────────────
+        sl_a5 = self._add_source_listing(sid_as24, "as24-sell-5",
+                                         "https://www.autoscout24.de/angebote/as24-sell-5")
+        snap_a5 = self._add_snapshot(sid_as24, "as24-sell-5", {
+            "title": "Audi A5 Cabriolet 40 TFSI", "price": 32000,
+            "km": 45000, "year": 2021, "hp": 204,
+        })
+        self.lid_a5 = self._add_listing(
+            sid_as24, "as24-sell-5", sl_a5, snap_a5,
+            32000, 45000, "Autohaus Müller GmbH",
+        )
+
+        sl_p5 = self._add_source_listing(sid_pkw, "pkw-sell-5",
+                                         "https://suche.pkw.de/fahrzeuge/details/pkw-sell-5")
+        snap_p5 = self._add_snapshot(sid_pkw, "pkw-sell-5", {
+            "title": "Audi A5 Cabriolet 40 TFSI S line", "price": 32000,
+            "mileage": 45000, "year": 2021, "power_hp": 204,
+            "seller_name": "Fahrzeugcenter Berlin",
+        })
+        self.lid_p5 = self._add_listing(
+            sid_pkw, "pkw-sell-5", sl_p5, snap_p5,
+            32000, 45000, "Fahrzeugcenter Berlin",
+        )
+
+        self._conn.commit()
+
+    # ── Tests ──────────────────────────────────────────────────────────────
+
+    def test_exact_duplicate_scores_very_strong(self):
+        """Exact match on price, mileage, seller, year, power, transmission, colour → VERY_STRONG."""
+        result = self._dd.score_listing_pair(self.lid_a1, self.lid_p1, conn=self._conn)
+        self.assertEqual(result["classification"], "VERY_STRONG",
+                         f"Expected VERY_STRONG, got {result['classification']} (score={result['score']})")
+        self.assertGreaterEqual(result["score"], 85)
+        self.assertIn("exact price: 47650", result["reasons"])
+        self.assertIn("exact mileage: 19500 km", result["reasons"])
+
+    def test_same_model_different_mileage_scores_lower(self):
+        """Same model+price but mileage 19500 vs 75000 → score well below VERY_STRONG."""
+        result = self._dd.score_listing_pair(self.lid_a2, self.lid_p2, conn=self._conn)
+        self.assertLess(result["score"], 85,
+                        f"Different-mileage pair must not reach VERY_STRONG (score={result['score']})")
+        self.assertTrue(
+            any("mileage" in d.lower() for d in result["differences"]),
+            "Mileage difference must appear in differences",
+        )
+
+    def test_same_title_different_seller_scores_lower(self):
+        """Same title + price but clearly different sellers → reduced score."""
+        result = self._dd.score_listing_pair(self.lid_a5, self.lid_p5, conn=self._conn)
+        # Seller penalty fires; score should be below VERY_STRONG
+        self.assertLess(result["score"], 85,
+                        f"Different-seller pair must not reach VERY_STRONG (score={result['score']})")
+
+    def test_conflicting_vin_never_strong(self):
+        """Conflicting VINs must prevent STRONG/VERY_STRONG classification."""
+        result = self._dd.score_listing_pair(self.lid_a3, self.lid_p3, conn=self._conn)
+        self.assertIn(result["classification"], ("LOW", "POSSIBLE"),
+                      f"Conflicting VIN must produce LOW/POSSIBLE (got {result['classification']})")
+        self.assertTrue(
+            any("conflicting VIN" in d for d in result["differences"]),
+            "Conflicting VIN must appear in differences",
+        )
+
+    def test_same_source_listings_excluded_from_candidates(self):
+        """Candidates from the same source (lid_a1 and lid_a4) must not appear."""
+        summary = self._dd.run_detection(dry_run=True, conn=self._conn)
+        same_source_pairs = [
+            c for c in summary["top_candidates"]
+            if {c["listing_id_a"], c["listing_id_b"]} == {self.lid_a1, self.lid_a4}
+        ]
+        self.assertEqual(len(same_source_pairs), 0,
+                         "Same-source listings must not be paired")
+
+    def test_candidate_persistence_is_idempotent(self):
+        """Running detection twice must not create duplicate candidate rows."""
+        self._dd.run_detection(dry_run=False, conn=self._conn)
+        count_after_first = self._conn.execute(
+            "SELECT COUNT(*) FROM listing_duplicate_candidates"
+        ).fetchone()[0]
+
+        self._dd.run_detection(dry_run=False, conn=self._conn)
+        count_after_second = self._conn.execute(
+            "SELECT COUNT(*) FROM listing_duplicate_candidates"
+        ).fetchone()[0]
+
+        self.assertEqual(count_after_first, count_after_second,
+                         "Repeated detection must not insert duplicate rows")
+
+    def test_evidence_is_stored(self):
+        """After detection, evidence for the exact-match pair must be persisted."""
+        self._dd.run_detection(dry_run=False, conn=self._conn)
+        a, b = min(self.lid_a1, self.lid_p1), max(self.lid_a1, self.lid_p1)
+        row = self._conn.execute(
+            "SELECT evidence, classification FROM listing_duplicate_candidates WHERE listing_id_a=? AND listing_id_b=?",
+            (a, b),
+        ).fetchone()
+        self.assertIsNotNone(row, "Exact-match pair must be persisted")
+        import json as _json
+        evidence = _json.loads(row[0])
+        self.assertIsInstance(evidence, list)
+        self.assertGreater(len(evidence), 0)
+        self.assertEqual(row[1], "VERY_STRONG")
+
+    def test_operator_status_preserved_on_rescore(self):
+        """A manually set status must survive a rescore."""
+        self._dd.run_detection(dry_run=False, conn=self._conn)
+        a, b = min(self.lid_a1, self.lid_p1), max(self.lid_a1, self.lid_p1)
+        self._conn.execute(
+            "UPDATE listing_duplicate_candidates SET status='CONFIRMED_SAME' WHERE listing_id_a=? AND listing_id_b=?",
+            (a, b),
+        )
+        self._conn.commit()
+
+        # Rescore
+        self._dd.run_detection(dry_run=False, conn=self._conn)
+
+        row = self._conn.execute(
+            "SELECT status FROM listing_duplicate_candidates WHERE listing_id_a=? AND listing_id_b=?",
+            (a, b),
+        ).fetchone()
+        self.assertEqual(row[0], "CONFIRMED_SAME",
+                         "Operator status must not be overwritten on rescore")
+
+    def test_no_vehicle_merge_occurs(self):
+        """Detection must never set vehicle_id on any listing."""
+        self._dd.run_detection(dry_run=False, conn=self._conn)
+        rows = self._conn.execute(
+            "SELECT COUNT(*) FROM listings WHERE vehicle_id IS NOT NULL"
+        ).fetchone()[0]
+        self.assertEqual(rows, 0, "Detection must not create any vehicle links")
+
+    def test_dry_run_does_not_write_candidates(self):
+        """dry_run=True must not persist anything."""
+        self._dd.run_detection(dry_run=True, conn=self._conn)
+        count = self._conn.execute(
+            "SELECT COUNT(*) FROM listing_duplicate_candidates"
+        ).fetchone()[0]
+        self.assertEqual(count, 0, "dry_run must not write candidate rows")
+
+    def test_score_pair_includes_required_keys(self):
+        """score_pair result must always contain score, classification, reasons, differences."""
+        result = self._dd.score_pair(
+            {"id": 1, "price": 30000, "mileage": 50000, "seller": "Test Dealer", "year": "2022"},
+            {"id": 2, "price": 30000, "mileage": 50000, "seller": "Test Dealer", "year": "2022"},
+        )
+        for key in ("score", "classification", "reasons", "differences"):
+            self.assertIn(key, result, f"Missing key: {key}")
+        self.assertIn(result["classification"],
+                      ("LOW", "POSSIBLE", "STRONG", "VERY_STRONG"))
+        self.assertGreaterEqual(result["score"], 0)
+        self.assertLessEqual(result["score"], 100)
+
+    def test_conflicting_vin_hard_veto_even_with_all_signals(self):
+        """
+        Even when every other signal matches perfectly, conflicting VINs must
+        produce LOW or POSSIBLE — never STRONG or VERY_STRONG.
+        This is the hard VIN veto rule.
+        """
+        perfect_match = {
+            "id": 1, "price": 47650, "mileage": 19500,
+            "seller": "Autocenter Neuss GmbH", "year": "2024",
+            "title": "Audi A5 45 TFSI", "power_hp": 265,
+            "drivetrain": "AWD", "transmission": "Automatik",
+            "colour": "grau",
+        }
+        a = {**perfect_match, "vin": "WAUZZZ8T0PA000001"}
+        b = {**perfect_match, "vin": "WAUZZZ8T0PA999999"}
+        result = self._dd.score_pair(a, b)
+        self.assertIn(
+            result["classification"], ("LOW", "POSSIBLE"),
+            f"Conflicting VIN must veto STRONG/VERY_STRONG even with all other signals matching "
+            f"(got {result['classification']}, score={result['score']})",
+        )
+        self.assertNotIn(result["classification"], ("STRONG", "VERY_STRONG"))
+
+    def test_snapshot_mutable_fields_not_used(self):
+        """
+        price, mileage, seller from listings table must override snapshot values.
+        If a historical snapshot has a different price/mileage, the listings
+        columns (current state) must win.
+        """
+        import json as _json
+        # Add a listing where snapshot has stale price/mileage
+        sl_stale = self._add_source_listing(
+            self.sid_as24, "as24-stale-snap",
+            "https://www.autoscout24.de/angebote/as24-stale-snap",
+        )
+        # Snapshot has OLD price 40000 / OLD mileage 10000
+        self._add_snapshot(self.sid_as24, "as24-stale-snap", {
+            "title": "Audi A5 40 TFSI", "price": 40000, "km": 10000,
+            "year": 2021, "seller_name": "Old Dealer",
+        })
+        snap_id = self._conn.execute(
+            "SELECT id FROM source_snapshots WHERE source_id=? AND source_listing_id=?",
+            (self.sid_as24, "as24-stale-snap"),
+        ).fetchone()[0]
+        # But listings.current_price = 44000, current_mileage = 55000 (updated after rescrape)
+        lid_stale = self._add_listing(
+            self.sid_as24, "as24-stale-snap", sl_stale, snap_id,
+            44000, 55000, "Current Dealer",
+        )
+        self._conn.commit()
+
+        # Build listing data and confirm mutable fields come from listings columns
+        snap = self._dd._get_snapshot_fields(lid_stale, self._conn)
+        row = self._conn.execute(
+            "SELECT id, source_id, source_listing_id, current_price, current_mileage, "
+            "current_seller, current_description, current_options FROM listings WHERE id=?",
+            (lid_stale,),
+        ).fetchone()
+        data = self._dd._listing_data(row, snap)
+
+        self.assertEqual(data["price"], 44000,
+                         "price must come from listings.current_price, not snapshot")
+        self.assertEqual(data["mileage"], 55000,
+                         "mileage must come from listings.current_mileage, not snapshot")
+        self.assertEqual(data["seller"], "Current Dealer",
+                         "seller must come from listings.current_seller, not snapshot")
+        # Snapshot-enriched stable field should still work
+        self.assertEqual(data["title"], "Audi A5 40 TFSI",
+                         "stable title from snapshot must still be available")
+
+    def test_stale_lifecycle_open_rows_marked_stale(self):
+        """
+        OPEN candidate rows that do not appear in a subsequent detection run
+        must be marked STALE.  CONFIRMED/DISMISSED rows must be preserved.
+        """
+        # First run: persist candidates normally
+        self._dd.run_detection(dry_run=False, conn=self._conn)
+
+        # Manually mark the exact-match pair as CONFIRMED_SAME
+        a, b = min(self.lid_a1, self.lid_p1), max(self.lid_a1, self.lid_p1)
+        self._conn.execute(
+            "UPDATE listing_duplicate_candidates SET status='CONFIRMED_SAME' WHERE listing_id_a=? AND listing_id_b=?",
+            (a, b),
+        )
+        self._conn.commit()
+
+        # Now make the a1/p1 pair fall out of the blocking window by updating mileage
+        # so they differ by far more than 5%
+        self._conn.execute(
+            "UPDATE listings SET current_mileage=200000 WHERE id=?",
+            (self.lid_p1,),
+        )
+        self._conn.commit()
+
+        # Second run: exact-match pair no longer passes blocking
+        self._dd.run_detection(dry_run=False, conn=self._conn)
+
+        # CONFIRMED_SAME must still be CONFIRMED_SAME (not STALE)
+        row = self._conn.execute(
+            "SELECT status FROM listing_duplicate_candidates WHERE listing_id_a=? AND listing_id_b=?",
+            (a, b),
+        ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row[0], "CONFIRMED_SAME",
+                         "CONFIRMED_SAME must not be changed to STALE")
+
+        # Check that a pair that was OPEN and is no longer in blocking is now STALE
+        # (pick the a2/p2 pair which has very different mileage and was never confirmed)
+        # Make a2/p2 pass blocking in first run by tweaking prices slightly different
+        # Actually: we need an OPEN row that was NOT re-evaluated.
+        # Insert a fake OPEN pair with non-existent listing IDs > real ones:
+        self._conn.execute(
+            """INSERT INTO listing_duplicate_candidates
+               (listing_id_a, listing_id_b, score, classification, evidence, differences,
+                status, last_evaluated_at, created_at, updated_at)
+               VALUES (1,999,50,'POSSIBLE','[]','[]','OPEN',datetime('now','-1 day'),
+                       datetime('now','-1 day'),datetime('now','-1 day'))""",
+        )
+        self._conn.commit()
+        # Third run: this fake pair (1,999) is never generated by real blocking
+        self._dd.run_detection(dry_run=False, conn=self._conn)
+        row_stale = self._conn.execute(
+            "SELECT status FROM listing_duplicate_candidates WHERE listing_id_a=1 AND listing_id_b=999"
+        ).fetchone()
+        self.assertIsNotNone(row_stale)
+        self.assertEqual(row_stale[0], "STALE",
+                         "OPEN rows not seen in latest run must be marked STALE")
+
+    def test_stale_row_revived_when_pair_reappears(self):
+        """
+        A STALE candidate must revert to OPEN when the pair appears again in
+        a subsequent detection run.
+        """
+        # Manually insert a STALE row for the exact-match pair
+        a, b = min(self.lid_a1, self.lid_p1), max(self.lid_a1, self.lid_p1)
+        self._conn.execute(
+            """INSERT INTO listing_duplicate_candidates
+               (listing_id_a, listing_id_b, score, classification, evidence, differences,
+                status, last_evaluated_at, created_at, updated_at)
+               VALUES (?,?,0,'LOW','[]','[]','STALE',datetime('now','-1 day'),
+                       datetime('now','-1 day'),datetime('now','-1 day'))""",
+            (a, b),
+        )
+        self._conn.commit()
+
+        # Run detection: the real pair passes blocking and gets rescored → STALE → OPEN
+        self._dd.run_detection(dry_run=False, conn=self._conn)
+
+        row = self._conn.execute(
+            "SELECT status, classification FROM listing_duplicate_candidates WHERE listing_id_a=? AND listing_id_b=?",
+            (a, b),
+        ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row[0], "OPEN",
+                         "Revived STALE pair must return to OPEN")
+        self.assertEqual(row[1], "VERY_STRONG",
+                         "Revived pair must be correctly rescored")
+
