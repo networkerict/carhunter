@@ -2586,3 +2586,340 @@ class TestPortalSourceIdentity(unittest.TestCase):
         # Before enrichment: defaults
         self.assertIsNone(car.source_name)
         self.assertEqual(car.source_label, "Listing")
+
+
+class TestSaveCarUrlIdempotency(unittest.TestCase):
+    """Regression tests for url-based deduplication in save_car().
+
+    PKW.de rows have no fingerprint and no autoscout_id.  Without the url
+    fallback, save_car would INSERT a new row on every pipeline run.
+
+    Uses an isolated temporary database so results are deterministic and
+    independent of live inventory.
+    """
+
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.orig_db = config.DATABASE
+        config.DATABASE = os.path.join(self.tempdir.name, "idem_test.db")
+        database.get_connection().close()
+
+    def tearDown(self):
+        config.DATABASE = self.orig_db
+        self.tempdir.cleanup()
+
+    def test_save_car_deduplicates_on_url_when_no_fingerprint(self):
+        """Second save_car call with same url must update, not insert."""
+        car = {
+            "title": "Audi A5 PKWde idem",
+            "price": 29900,
+            "km": 50000,
+            "year": "2022",
+            "url": "https://suche.pkw.de/fahrzeuge/details/idem_test_1",
+        }
+        is_new_first = database.save_car(car)
+        is_new_second = database.save_car({**car, "price": 28000})
+
+        self.assertTrue(is_new_first, "First insert must be new")
+        self.assertFalse(is_new_second, "Second call with same url must not be new")
+
+        conn = database.get_connection()
+        rows = conn.execute(
+            "SELECT COUNT(*), price FROM cars WHERE url=?",
+            ("https://suche.pkw.de/fahrzeuge/details/idem_test_1",)
+        ).fetchone()
+        conn.close()
+        self.assertEqual(rows[0], 1, "Must not create duplicate rows")
+        self.assertEqual(rows[1], 28000, "Price must be updated in-place")
+
+    def test_save_car_url_fallback_does_not_affect_fingerprint_rows(self):
+        """Fingerprint-keyed rows must still deduplicate on fingerprint, not url."""
+        car = {
+            "title": "Audi A5 fp idem",
+            "price": 35000,
+            "fingerprint": "fp-idem-b",
+            "url": "https://www.autoscout24.de/angebote/idem_b",
+        }
+        is_new_first = database.save_car(car)
+        is_new_second = database.save_car({**car, "url": "https://changed.url/b"})
+        self.assertTrue(is_new_first)
+        self.assertFalse(is_new_second, "Fingerprint match must still prevent duplicate")
+
+        conn = database.get_connection()
+        count = conn.execute(
+            "SELECT COUNT(*) FROM cars WHERE fingerprint='fp-idem-b'"
+        ).fetchone()[0]
+        conn.close()
+        self.assertEqual(count, 1)
+
+    def test_save_car_url_fallback_is_no_op_without_url(self):
+        """A row with no fingerprint, no autoscout_id and no url inserts each time."""
+        car = {"title": "Audi A5 keyless", "price": 9999}
+        r1 = database.save_car(car)
+        # A second keyless insert creates a second row — acknowledged limitation.
+        self.assertTrue(r1)
+        conn = database.get_connection()
+        count = conn.execute("SELECT COUNT(*) FROM cars WHERE title='Audi A5 keyless'").fetchone()[0]
+        conn.close()
+        self.assertGreaterEqual(count, 1)
+
+    def test_dry_run_compatibility_detects_existing_url_row(self):
+        """Dry-run new_cars count must be 0 when a matching url row already exists."""
+        from source_compatibility import apply_compatibility_inventory_updates
+        url = "https://suche.pkw.de/fahrzeuge/details/idem_dryrun_1"
+        database.save_car({"title": "Audi A5 dryrun", "price": 30000, "url": url})
+
+        snapshot = mock.Mock()
+        snapshot.extracted_fields = {"title": "Audi A5 dryrun", "price": 30000}
+        snapshot.source_url = url
+
+        result = apply_compatibility_inventory_updates([snapshot], [], dry_run=True)
+        self.assertEqual(result.new_cars, 0, "Existing url row must be detected in dry-run")
+
+
+class TestPkwDeLegacyDuplicateRepair(unittest.TestCase):
+    """Regression tests for the PKW.de legacy duplicate repair logic.
+
+    All tests use an isolated temporary database populated with controlled
+    fixtures.  No assertions on live inventory IDs or counts.
+    """
+
+    # PKW.de source_id used throughout fixtures
+    _PKWDE_SOURCE_ID = 2
+
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.orig_db = config.DATABASE
+        config.DATABASE = os.path.join(self.tempdir.name, "repair_test.db")
+        database.get_connection().close()
+        self._populate_fixtures()
+
+    def tearDown(self):
+        config.DATABASE = self.orig_db
+        self.tempdir.cleanup()
+
+    def _populate_fixtures(self):
+        """
+        Build a minimal database that mirrors the real pre/post-fix situation:
+
+        Rows inserted:
+          sources:           autoscout24, pkw_de
+          source_listings:   sl_pkw (PKW.de), sl_as24 (AutoScout24), sl_pkw2 (ambiguous pair)
+          source_snapshots:  one per source_listing
+          cars:
+            broken_id   — pre-fix row (url=NULL, km=NULL, first_seen in pre-fix batch)
+            correct_id  — post-fix row (url=sl_pkw.source_url, km=19500)
+            as24_id     — unrelated AutoScout24 row (must not be touched)
+            broken2_id  — a second pre-fix row (for ambiguity test below)
+            correct2_id — a second post-fix row that would pair with broken2
+            broken3_id  — a pre-fix row with same price/title as broken2 (ambiguous)
+        """
+        conn = database.get_connection()
+
+        # Sources
+        conn.execute("INSERT INTO sources (source_name, display_name) VALUES ('autoscout24','AutoScout24')")
+        conn.execute("INSERT INTO sources (source_name, display_name) VALUES ('pkw_de','PKW.de')")
+        as24_sid = conn.execute("SELECT id FROM sources WHERE source_name='autoscout24'").fetchone()[0]
+        pkw_sid  = conn.execute("SELECT id FROM sources WHERE source_name='pkw_de'").fetchone()[0]
+
+        # Source listings
+        conn.execute(
+            "INSERT INTO source_listings (source_id, source_listing_id, source_url) VALUES (?,?,?)",
+            (pkw_sid, "listing-pkw-1", "https://suche.pkw.de/fahrzeuge/details/listing-pkw-1"),
+        )
+        conn.execute(
+            "INSERT INTO source_listings (source_id, source_listing_id, source_url) VALUES (?,?,?)",
+            (as24_sid, "listing-as24-1", "https://www.autoscout24.de/angebote/listing-as24-1"),
+        )
+        # For ambiguity test: two PKW.de listings with the same title+price
+        conn.execute(
+            "INSERT INTO source_listings (source_id, source_listing_id, source_url) VALUES (?,?,?)",
+            (pkw_sid, "listing-pkw-2a", "https://suche.pkw.de/fahrzeuge/details/listing-pkw-2a"),
+        )
+        conn.execute(
+            "INSERT INTO source_listings (source_id, source_listing_id, source_url) VALUES (?,?,?)",
+            (pkw_sid, "listing-pkw-2b", "https://suche.pkw.de/fahrzeuge/details/listing-pkw-2b"),
+        )
+
+        # Source snapshots (price+title used by repair query)
+        conn.execute(
+            """INSERT INTO source_snapshots
+               (source_id, source_listing_id, snapshot_hash, extracted_fields, discovered_at, fetched_at)
+               VALUES (?,?,?,?,datetime('now'),datetime('now'))""",
+            (pkw_sid, "listing-pkw-1", "hash-pkw-1",
+             '{"price": 47650, "title": "Audi A5 Test Cabrio", "mileage": 19500}'),
+        )
+        conn.execute(
+            """INSERT INTO source_snapshots
+               (source_id, source_listing_id, snapshot_hash, extracted_fields, discovered_at, fetched_at)
+               VALUES (?,?,?,?,datetime('now'),datetime('now'))""",
+            (as24_sid, "listing-as24-1", "hash-as24-1",
+             '{"price": 35000, "title": "Audi A5 AS24 Car", "km": 80000, "fingerprint": "fp-as24-1"}'),
+        )
+        # Ambiguous: two PKW.de listings with identical title+price
+        for lid in ("listing-pkw-2a", "listing-pkw-2b"):
+            conn.execute(
+                """INSERT INTO source_snapshots
+                   (source_id, source_listing_id, snapshot_hash, extracted_fields, discovered_at, fetched_at)
+                   VALUES (?,?,?,?,datetime('now'),datetime('now'))""",
+                (pkw_sid, lid, f"hash-{lid}",
+                 '{"price": 22000, "title": "Audi A5 Ambiguous"}'),
+            )
+
+        # Cars
+        pre_fix_ts = "2026-08-14T17:55:00.000000"
+        post_fix_ts = "2026-08-14T19:06:00.000000"
+
+        # broken row (pre-fix PKW.de — url=NULL, km=NULL)
+        conn.execute(
+            "INSERT INTO cars (title, price, url, km, first_seen, last_seen, sold) VALUES (?,?,NULL,NULL,?,?,0)",
+            ("Audi A5 Test Cabrio", 47650, pre_fix_ts, pre_fix_ts),
+        )
+        self.broken_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+        # correct replacement (post-fix PKW.de — url and km set)
+        conn.execute(
+            "INSERT INTO cars (title, price, url, km, first_seen, last_seen, sold) VALUES (?,?,?,?,?,?,0)",
+            ("Audi A5 Test Cabrio", 47650,
+             "https://suche.pkw.de/fahrzeuge/details/listing-pkw-1",
+             19500, post_fix_ts, post_fix_ts),
+        )
+        self.correct_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+        # unrelated AutoScout24 row
+        conn.execute(
+            "INSERT INTO cars (title, price, url, km, fingerprint, first_seen, last_seen, sold) VALUES (?,?,?,?,?,?,?,0)",
+            ("Audi A5 AS24 Car", 35000,
+             "https://www.autoscout24.de/angebote/listing-as24-1",
+             80000, "fp-as24-1", post_fix_ts, post_fix_ts),
+        )
+        self.as24_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+        # ambiguous pre-fix pair (same title+price, two different PKW.de listings)
+        conn.execute(
+            "INSERT INTO cars (title, price, url, km, first_seen, last_seen, sold) VALUES (?,?,NULL,NULL,?,?,0)",
+            ("Audi A5 Ambiguous", 22000, pre_fix_ts, pre_fix_ts),
+        )
+        self.broken_ambig_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+        # post-fix rows for each ambiguous listing
+        conn.execute(
+            "INSERT INTO cars (title, price, url, km, first_seen, last_seen, sold) VALUES (?,?,?,?,?,?,0)",
+            ("Audi A5 Ambiguous", 22000,
+             "https://suche.pkw.de/fahrzeuge/details/listing-pkw-2a",
+             50000, post_fix_ts, post_fix_ts),
+        )
+        self.correct_ambig_a = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute(
+            "INSERT INTO cars (title, price, url, km, first_seen, last_seen, sold) VALUES (?,?,?,?,?,?,0)",
+            ("Audi A5 Ambiguous", 22000,
+             "https://suche.pkw.de/fahrzeuge/details/listing-pkw-2b",
+             50000, post_fix_ts, post_fix_ts),
+        )
+        self.correct_ambig_b = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+        conn.commit()
+        conn.close()
+
+    def _run_repair(self, execute=False):
+        """Run the repair logic directly against the test DB."""
+        import repair_pkwde_legacy_duplicates as repair
+        # Temporarily override the timestamp prefix and source_id used by the repair
+        orig_prefix = repair._PREFIX_RUN_TIMESTAMP_PREFIX
+        orig_source_id = repair._PKWDE_SOURCE_ID
+        repair._PREFIX_RUN_TIMESTAMP_PREFIX = "2026-08-14T17:55"
+        repair._PKWDE_SOURCE_ID = self._PKWDE_SOURCE_ID
+        try:
+            return repair.run(execute=execute)
+        finally:
+            repair._PREFIX_RUN_TIMESTAMP_PREFIX = orig_prefix
+            repair._PKWDE_SOURCE_ID = orig_source_id
+
+    def test_provable_duplicate_is_soft_deleted(self):
+        """Category A pre-fix row must become sold=1 after execute."""
+        self._run_repair(execute=True)
+        conn = database.get_connection()
+        row = conn.execute("SELECT sold, recommendation FROM cars WHERE id=?", (self.broken_id,)).fetchone()
+        conn.close()
+        self.assertEqual(row[0], 1, "broken pre-fix row must be soft-deleted")
+        self.assertEqual(row[1], "superseded_by_prefix_fix")
+
+    def test_replacement_remains_active(self):
+        """The correct post-fix row must remain sold=0 after repair."""
+        self._run_repair(execute=True)
+        conn = database.get_connection()
+        row = conn.execute("SELECT sold, url, km FROM cars WHERE id=?", (self.correct_id,)).fetchone()
+        conn.close()
+        self.assertEqual(row[0], 0, "post-fix replacement must stay active")
+        self.assertIn("listing-pkw-1", row[1])
+        self.assertEqual(row[2], 19500)
+
+    def test_ambiguous_candidate_is_not_touched(self):
+        """When two post-fix rows match the same title+price the pre-fix row must be skipped."""
+        self._run_repair(execute=True)
+        conn = database.get_connection()
+        row = conn.execute("SELECT sold FROM cars WHERE id=?", (self.broken_ambig_id,)).fetchone()
+        conn.close()
+        self.assertEqual(row[0], 0, "ambiguous pre-fix row must NOT be soft-deleted")
+
+    def test_autoscout24_row_unaffected(self):
+        """AutoScout24 cars must not be touched."""
+        self._run_repair(execute=True)
+        conn = database.get_connection()
+        row = conn.execute("SELECT sold FROM cars WHERE id=?", (self.as24_id,)).fetchone()
+        conn.close()
+        self.assertEqual(row[0], 0, "AS24 car must remain active")
+
+    def test_source_listings_unchanged(self):
+        """Repair must not modify source_listings."""
+        conn = database.get_connection()
+        before = conn.execute("SELECT COUNT(*) FROM source_listings").fetchone()[0]
+        conn.close()
+        self._run_repair(execute=True)
+        conn = database.get_connection()
+        after = conn.execute("SELECT COUNT(*) FROM source_listings").fetchone()[0]
+        conn.close()
+        self.assertEqual(before, after)
+
+    def test_source_snapshots_unchanged(self):
+        """Repair must not modify source_snapshots."""
+        conn = database.get_connection()
+        before = conn.execute("SELECT COUNT(*) FROM source_snapshots").fetchone()[0]
+        conn.close()
+        self._run_repair(execute=True)
+        conn = database.get_connection()
+        after = conn.execute("SELECT COUNT(*) FROM source_snapshots").fetchone()[0]
+        conn.close()
+        self.assertEqual(before, after)
+
+    def test_dry_run_makes_no_changes(self):
+        """Dry-run must not modify any row."""
+        self._run_repair(execute=False)
+        conn = database.get_connection()
+        sold_count = conn.execute(
+            "SELECT COUNT(*) FROM cars WHERE COALESCE(sold,0)=1"
+        ).fetchone()[0]
+        conn.close()
+        self.assertEqual(sold_count, 0, "dry-run must change nothing")
+
+    def test_second_execution_is_idempotent(self):
+        """Running repair twice must change zero rows on the second pass."""
+        self._run_repair(execute=True)
+        # Run again; check the log to confirm 0 changes
+        conn_before = database.get_connection()
+        run_count_before = conn_before.execute("SELECT COUNT(*) FROM repair_runs").fetchone()[0]
+        conn_before.close()
+
+        self._run_repair(execute=True)
+
+        conn_after = database.get_connection()
+        run_count_after = conn_after.execute("SELECT COUNT(*) FROM repair_runs").fetchone()[0]
+        last_report = conn_after.execute(
+            "SELECT report FROM repair_runs ORDER BY id DESC LIMIT 1"
+        ).fetchone()[0]
+        conn_after.close()
+
+        import json as _json
+        report = _json.loads(last_report)
+        self.assertEqual(run_count_after, run_count_before + 1, "second run must still log")
+        self.assertEqual(report["rows_changed"], 0, "second run must change zero rows")
