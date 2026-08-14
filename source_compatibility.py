@@ -15,7 +15,20 @@ class CompatibilityInventoryResult:
 
 
 def snapshot_to_compatibility_payload(snapshot: SourceSnapshot) -> dict:
-    return dict(snapshot.extracted_fields)
+    payload = dict(snapshot.extracted_fields)
+
+    # Normalise mileage: legacy save_car reads "km"; some adapters emit "mileage".
+    if payload.get("km") is None and payload.get("mileage") is not None:
+        payload["km"] = payload["mileage"]
+
+    # Normalise URL: legacy save_car reads "url"; inject from snapshot.source_url
+    # when the adapter does not already include a "url" key.
+    if not payload.get("url"):
+        source_url = str(getattr(snapshot, "source_url", "") or "")
+        if source_url:
+            payload["url"] = source_url
+
+    return payload
 
 
 def should_fetch_detail_for_listing(listing: DiscoveredListing) -> bool:
