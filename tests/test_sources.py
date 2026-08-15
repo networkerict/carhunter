@@ -3136,8 +3136,8 @@ class TestDuplicateDetection(unittest.TestCase):
         self.assertEqual(result["classification"], "VERY_STRONG",
                          f"Expected VERY_STRONG, got {result['classification']} (score={result['score']})")
         self.assertGreaterEqual(result["score"], 85)
-        self.assertIn("exact price: 47650", result["reasons"])
-        self.assertIn("exact mileage: 19500 km", result["reasons"])
+        self.assertIn("exact price: €47.650", result["reasons"])
+        self.assertIn("exact mileage: 19.500 km", result["reasons"])
 
     def test_same_model_different_mileage_scores_lower(self):
         """Same model+price but mileage 19500 vs 75000 → score well below VERY_STRONG."""
@@ -3207,24 +3207,40 @@ class TestDuplicateDetection(unittest.TestCase):
         self.assertEqual(row[1], "VERY_STRONG")
 
     def test_operator_status_preserved_on_rescore(self):
-        """A manually set status must survive a rescore."""
+        """All human review fields must survive a rescore."""
         self._dd.run_detection(dry_run=False, conn=self._conn)
         a, b = min(self.lid_a1, self.lid_p1), max(self.lid_a1, self.lid_p1)
-        self._conn.execute(
-            "UPDATE listing_duplicate_candidates SET status='CONFIRMED_SAME' WHERE listing_id_a=? AND listing_id_b=?",
-            (a, b),
-        )
-        self._conn.commit()
+        for status in (
+            "CONFIRMED_SAME", "CONFIRMED_DIFFERENT", "UNSURE", "DISMISSED"
+        ):
+            with self.subTest(status=status):
+                comment = f"operator ground truth: {status}"
+                self._conn.execute(
+                    """
+                    UPDATE listing_duplicate_candidates
+                    SET status=?, operator_comment=?, reviewed_at=?
+                    WHERE listing_id_a=? AND listing_id_b=?
+                    """,
+                    (status, comment, "2026-08-15T10:00:00", a, b),
+                )
+                self._conn.commit()
 
-        # Rescore
-        self._dd.run_detection(dry_run=False, conn=self._conn)
+                self._dd.run_detection(dry_run=False, conn=self._conn)
 
-        row = self._conn.execute(
-            "SELECT status FROM listing_duplicate_candidates WHERE listing_id_a=? AND listing_id_b=?",
-            (a, b),
-        ).fetchone()
-        self.assertEqual(row[0], "CONFIRMED_SAME",
-                         "Operator status must not be overwritten on rescore")
+                row = self._conn.execute(
+                    """
+                    SELECT status, operator_comment, reviewed_at
+                    FROM listing_duplicate_candidates
+                    WHERE listing_id_a=? AND listing_id_b=?
+                    """,
+                    (a, b),
+                ).fetchone()
+                self.assertEqual(
+                    row[0], status,
+                    "Operator status must not be overwritten on rescore",
+                )
+                self.assertEqual(row[1], comment)
+                self.assertEqual(row[2], "2026-08-15T10:00:00")
 
     def test_no_vehicle_merge_occurs(self):
         """Detection must never set vehicle_id on any listing."""
@@ -3549,11 +3565,11 @@ class TestDuplicateReviewPortal(unittest.TestCase):
         # Persist candidates
         self.cid_vs = self._insert_candidate(
             self.lid_a1, self.lid_p1, 93, "VERY_STRONG", "OPEN",
-            evidence=["exact price: 47650", "exact mileage: 19500 km", "same seller: Autocenter Neuss"],
+            evidence=["exact price: €47.650", "exact mileage: 19.500 km", "same seller: Autocenter Neuss"],
         )
         self.cid_strong = self._insert_candidate(
             self.lid_a2, self.lid_p2, 75, "STRONG", "OPEN",
-            evidence=["exact price: 28000", "exact mileage: 60000 km"],
+            evidence=["exact price: €28.000", "exact mileage: 60.000 km"],
         )
 
     # ── Tests ──────────────────────────────────────────────────────────────
@@ -4084,3 +4100,494 @@ class TestDuplicateSchemaMigration(unittest.TestCase):
         self.assertIsNone(next2,
                           "get_next_open_candidate must return None after the last OPEN candidate, "
                           "not wrap to the first")
+
+
+class TestNormalization(unittest.TestCase):
+    """
+    Regression tests for semantic normalization helpers in duplicate_detection.py.
+    All tests are pure unit tests — no database required.
+    """
+
+    def setUp(self):
+        import duplicate_detection as _dd
+        self._dd = _dd
+
+    # ── Colour ────────────────────────────────────────────────────────────
+
+    def _colour(self, s):
+        return self._dd._norm_colour(s)
+
+    def test_colour_de_nl_equivalents(self):
+        """Common DE/NL/EN colour equivalents must normalise to the same canonical value."""
+        pairs = [
+            ("zilver", "silber"),   # NL vs DE
+            ("grijs",  "grau"),     # NL vs DE
+            ("zwart",  "schwarz"),  # NL vs DE
+            ("rood",   "rot"),      # NL vs DE
+            ("groen",  "grün"),     # NL vs DE
+            ("wit",    "weiß"),     # NL vs DE
+            ("wit",    "weiss"),    # NL vs DE alt
+            ("blauw",  "blau"),     # NL vs DE
+            ("bruin",  "braun"),    # NL vs DE
+        ]
+        for a, b in pairs:
+            with self.subTest(a=a, b=b):
+                self.assertEqual(self._colour(a), self._colour(b),
+                                 f"colour '{a}' and '{b}' must normalise to the same value")
+
+    def test_colour_en_de_equivalents(self):
+        """EN/DE colour equivalents."""
+        pairs = [
+            ("grey", "grau"), ("gray", "grau"), ("silver", "silber"),
+            ("black", "schwarz"), ("white", "weiß"), ("blue", "blau"),
+            ("red", "rot"), ("green", "grün"), ("brown", "braun"),
+        ]
+        for a, b in pairs:
+            with self.subTest(a=a, b=b):
+                self.assertEqual(self._colour(a), self._colour(b))
+
+    def test_colour_none_returns_empty(self):
+        self.assertEqual(self._colour(None), "")
+        self.assertEqual(self._colour(""), "")
+
+    def test_colour_unknown_passthrough(self):
+        """Unknown colour values must pass through unchanged (lowercased)."""
+        self.assertEqual(self._colour("Champagner"), "champagner")
+
+    # ── Seller ────────────────────────────────────────────────────────────
+
+    def _seller(self, s):
+        return self._dd._norm_seller(s)
+
+    def _sim(self, a, b):
+        return self._dd._token_similarity(
+            self._dd._norm_seller(a), self._dd._norm_seller(b)
+        )
+
+    def test_seller_extracts_company_name_from_dict_repr(self):
+        """_norm_seller must extract companyName from AS24 Python dict repr."""
+        raw = "{'companyName': 'Autogalerie Remscheid', 'other': 'stuff'}"
+        normed = self._seller(raw)
+        # After normalisation the core name token must be present
+        # (generic prefix "AUTOGALERIE" may be stripped; "REMSCHEID" must remain)
+        self.assertIn("REMSCHEID", normed,
+                      f"Core dealer name token must survive normalisation: {normed!r}")
+
+    def test_seller_strips_legal_suffixes(self):
+        """GmbH, KG, Co etc. must be removed."""
+        self.assertNotIn("GMBH", self._seller("Autohaus Schmidt GmbH"))
+        self.assertNotIn("KG",   self._seller("Autohaus Schmidt GmbH & Co. KG"))
+
+    def test_seller_strips_dealer_prefix(self):
+        """Generic dealer prefixes (Autohaus, Auto, …) must be stripped."""
+        self.assertNotIn("AUTOHAUS", self._seller("Autohaus Schmidt"))
+        self.assertNotIn("AUTO",     self._seller("Autocenter Neuss"))
+
+    def test_seller_autohaus_prefix_match(self):
+        """'Autohaus Schmidt' vs 'Schmidt' must score >= 0.70."""
+        sim = self._sim("Autohaus Schmidt GmbH", "Schmidt")
+        self.assertGreaterEqual(sim, 0.70,
+                                f"'Autohaus Schmidt GmbH' vs 'Schmidt' sim={sim:.2f} must be >= 0.70")
+
+    def test_seller_dannacker_case(self):
+        """Dannacker & Laudien GmbH vs Autohaus Dannacker & Laudien GmbH & Co. KG."""
+        a = "{'companyName': 'Dannacker & Laudien GmbH'}"
+        b = "Autohaus Dannacker & Laudien GmbH & Co. KG"
+        sim = self._sim(a, b)
+        self.assertGreaterEqual(sim, 0.70,
+                                f"Dannacker case sim={sim:.2f} must be >= 0.70")
+
+    def test_seller_klann_case(self):
+        """'Autohaus Klann GmbH' vs 'Autohaus Klann'."""
+        a = "{'companyName': 'Autohaus Klann GmbH'}"
+        b = "Autohaus Klann"
+        sim = self._sim(a, b)
+        self.assertEqual(sim, 1.0, f"Klann case sim={sim:.2f} must be 1.0")
+
+    def test_seller_hyphen_space_variant(self):
+        """'Nord-Automobile' vs 'Nord Automobile' must match."""
+        a = "{'companyName': 'Nord-Automobile'}"
+        b = "Nord Automobile"
+        sim = self._sim(a, b)
+        self.assertGreaterEqual(sim, 0.70,
+                                f"Hyphen/space variant sim={sim:.2f} must be >= 0.70")
+
+    def test_seller_clearly_different_stays_low(self):
+        """Unrelated sellers must not score >= 0.70."""
+        sim = self._sim("Autohaus München GmbH", "Fahrzeugcenter Hamburg AG")
+        self.assertLess(sim, 0.70,
+                        f"Clearly different sellers sim={sim:.2f} must be < 0.70")
+
+    def test_seller_none_returns_empty(self):
+        self.assertEqual(self._seller(None), "")
+        self.assertEqual(self._seller(""), "")
+
+    def test_seller_contact_name_matches_plain_seller(self):
+        a = {
+            "seller": (
+                "{'companyName': 'Autohaus Eggers', "
+                "'contactName': 'Yannick Hoppe'}"
+            ),
+        }
+        b = {"seller": "Fahrzeugtechnik Yannick Hoppe"}
+        result = self._dd.score_pair(a, b)
+        self.assertIn("same seller contact: Yannick Hoppe", result["reasons"])
+
+    def test_related_seller_companies_are_not_identical(self):
+        result = self._dd.score_pair(
+            {"seller": "Cosmo D&V GmbH"},
+            {"seller": "Cosmo Gruppe"},
+        )
+        self.assertTrue(
+            any(reason.startswith("related seller companies:") for reason in result["reasons"])
+        )
+        self.assertFalse(
+            any(reason.startswith("same seller company:") for reason in result["reasons"])
+        )
+
+    def test_generic_automobile_token_does_not_relate_companies(self):
+        result = self._dd.score_pair(
+            {"seller": "Fischer Automobile GmbH & Co. KG"},
+            {"seller": "Nord Automobile"},
+        )
+        self.assertTrue(
+            any(diff.startswith("seller conflict:") for diff in result["differences"])
+        )
+
+    # ── Vehicle signature and contradictions ─────────────────────────────
+
+    def test_tdi_tfsi_conflict_vetoes_strong(self):
+        result = self._dd.score_pair(
+            {
+                "price": 16900, "mileage": 121000, "year": 2016,
+                "title": "Audi A5 2.0 TDI",
+            },
+            {
+                "price": 16740, "mileage": 121133, "year": "2016-03-01",
+                "title": "Audi A5 Cabriolet 1.8TFSI",
+            },
+        )
+        self.assertEqual(result["classification"], "LOW")
+        self.assertIn("engine conflict: TDI vs TFSI", result["differences"])
+
+    def test_model_designation_conflict_vetoes_strong(self):
+        result = self._dd.score_pair(
+            {
+                "price": 32380, "mileage": 59200, "year": 2022,
+                "title": "Audi A5 40 TDI",
+            },
+            {
+                "price": 32680, "mileage": 58750, "year": 2022,
+                "title": "Audi A5 Cabriolet 35 TDI",
+            },
+        )
+        self.assertEqual(result["classification"], "LOW")
+        self.assertIn(
+            "model designation conflict: 40 vs 35", result["differences"]
+        )
+
+    def test_structured_signature_precedes_title_fallback(self):
+        signature = self._dd._vehicle_signature({
+            "title": "Audi A5 35 TFSI",
+            "engine_family": "TDI",
+            "model_designation": "40",
+        })
+        self.assertEqual(signature["engine_family"], "TDI")
+        self.assertEqual(signature["model_designation"], "40")
+
+    def test_model_variant_supplies_structured_signature(self):
+        data = self._dd._listing_data(
+            (1, 1, "source-1", 20000, 50000, "Dealer", None, None),
+            {"title": "Audi A5", "model_variant": "40 TDI"},
+        )
+        signature = self._dd._vehicle_signature(data)
+        self.assertEqual(signature["engine_family"], "TDI")
+        self.assertEqual(signature["model_designation"], "40")
+
+    def test_manual_automatic_is_strong_negative_evidence(self):
+        base = {
+            "price": 20000, "mileage": 50000, "year": 2020,
+            "title": "Audi A5 40 TDI",
+        }
+        result = self._dd.score_pair(
+            {**base, "transmission": "Schaltgetriebe"},
+            {**base, "transmission": "Automatik"},
+        )
+        self.assertIn(
+            "transmission conflict: manual vs auto", result["differences"]
+        )
+        self.assertLess(result["score"], 60)
+
+    # ── Gearbox ───────────────────────────────────────────────────────────
+
+    def _gearbox(self, s):
+        return self._dd._norm_gearbox(s)
+
+    def test_gearbox_de_en_equivalents(self):
+        self.assertEqual(self._gearbox("Automatik"), self._gearbox("automatic"))
+        self.assertEqual(self._gearbox("DSG"),       self._gearbox("auto"))
+        self.assertEqual(self._gearbox("S Tronic"),  self._gearbox("Automatik"))
+        self.assertEqual(self._gearbox("Schaltgetriebe"), self._gearbox("manual"))
+        self.assertEqual(self._gearbox("manuell"),   self._gearbox("manual"))
+
+    # ── Drivetrain ────────────────────────────────────────────────────────
+
+    def _drive(self, s):
+        return self._dd._norm_drive(s)
+
+    def test_drive_equivalents(self):
+        self.assertEqual(self._drive("Allrad"),  self._drive("AWD"))
+        self.assertEqual(self._drive("quattro"), self._drive("4wd"))
+        self.assertEqual(self._drive("4motion"), self._drive("awd"))
+        self.assertEqual(self._drive("Frontantrieb"), self._drive("FWD"))
+        self.assertEqual(self._drive("Hinterrad"),    self._drive("RWD"))
+
+    # ── Evidence formatting ────────────────────────────────────────────────
+
+    def test_price_evidence_uses_formatted_currency(self):
+        """Price evidence must use € and dot-thousands separator."""
+        a = {"price": 24990, "mileage": 39800, "seller": "Dealer"}
+        b = {"price": 24990, "mileage": 39800, "seller": "Dealer"}
+        result = self._dd.score_pair(a, b)
+        self.assertTrue(
+            any("€24.990" in r for r in result["reasons"]),
+            f"Price evidence must show '€24.990': {result['reasons']}",
+        )
+
+    def test_mileage_evidence_uses_formatted_km(self):
+        """Mileage evidence must use dot-thousands separator and ' km'."""
+        a = {"price": 24990, "mileage": 39800, "seller": "Dealer"}
+        b = {"price": 24990, "mileage": 39800, "seller": "Dealer"}
+        result = self._dd.score_pair(a, b)
+        self.assertTrue(
+            any("39.800 km" in r for r in result["reasons"]),
+            f"Mileage evidence must show '39.800 km': {result['reasons']}",
+        )
+
+    def test_exact_mileage_requires_equal_values(self):
+        result = self._dd.score_pair(
+            {"mileage": 195380},
+            {"mileage": 195380},
+        )
+        self.assertEqual(result["reasons"], ["exact mileage: 195.380 km"])
+
+    def test_close_mileage_wording_shows_both_values(self):
+        result = self._dd.score_pair(
+            {"mileage": 195380},
+            {"mileage": 195823},
+        )
+        self.assertIn(
+            "close mileage: 195.380 vs 195.823 km", result["reasons"]
+        )
+        self.assertFalse(any("exact mileage" in reason for reason in result["reasons"]))
+
+    def test_different_mileage_wording(self):
+        result = self._dd.score_pair(
+            {"mileage": 100000},
+            {"mileage": 120000},
+        )
+        self.assertTrue(
+            any(diff.startswith("different mileage: 100.000 vs 120.000 km")
+                for diff in result["differences"])
+        )
+
+    def test_close_price_is_not_described_as_exact(self):
+        result = self._dd.score_pair(
+            {"price": 24990},
+            {"price": 25090},
+        )
+        self.assertIn("close price: €24.990 vs €25.090", result["reasons"])
+        self.assertFalse(any("exact price" in reason for reason in result["reasons"]))
+
+    def test_exact_price_requires_equal_values(self):
+        result = self._dd.score_pair(
+            {"price": 24990},
+            {"price": 24990},
+        )
+        self.assertEqual(result["reasons"], ["exact price: €24.990"])
+
+    def test_different_price_wording(self):
+        result = self._dd.score_pair(
+            {"price": 20000},
+            {"price": 25000},
+        )
+        self.assertTrue(
+            any(diff.startswith("different price: €20.000 vs €25.000")
+                for diff in result["differences"])
+        )
+
+    def test_candidate_105_mileage_is_close_not_exact(self):
+        result = self._dd.score_pair(
+            {"price": 9999, "mileage": 195380},
+            {"price": 9999, "mileage": 195823},
+        )
+        mileage_reasons = [
+            reason for reason in result["reasons"] if "mileage" in reason
+        ]
+        self.assertEqual(
+            mileage_reasons,
+            ["close mileage: 195.380 vs 195.823 km"],
+        )
+
+    def test_structured_fuel_family_conflict_vetoes_strong(self):
+        result = self._dd.score_pair(
+            {
+                "price": 24990, "mileage": 39800,
+                "title": "Audi A5 Cabriolet", "fuel": "Diesel",
+            },
+            {
+                "price": 24990, "mileage": 39800,
+                "title": "Audi A5 Cabriolet", "fuel": "Benzin",
+            },
+        )
+        self.assertEqual(result["classification"], "LOW")
+        self.assertIn(
+            "fuel family conflict: diesel vs petrol",
+            result["differences"],
+        )
+
+    def test_registration_date_and_year_match(self):
+        result = self._dd.score_pair(
+            {"year": "2016"},
+            {"first_registration": "2016-04-01"},
+        )
+        self.assertIn("same registration year: 2016", result["reasons"])
+
+    def test_different_colour_is_negative_evidence(self):
+        result = self._dd.score_pair(
+            {"colour": "weiß"},
+            {"colour": "black"},
+        )
+        self.assertEqual(result["score"], 0)
+        self.assertIn("colour conflict: white vs black", result["differences"])
+
+    def test_missing_colour_is_not_a_contradiction(self):
+        result = self._dd.score_pair(
+            {"colour": None},
+            {"colour": "black"},
+        )
+        self.assertFalse(any("colour" in diff for diff in result["differences"]))
+
+    def test_confirmed_same_possible_shape_becomes_strong(self):
+        result = self._dd.score_pair(
+            {
+                "price": 9980, "mileage": 122621, "year": 2010,
+                "title": "Audi A5 2.0 TFSI",
+                "seller": (
+                    "{'companyName': 'Autohaus Eggers', "
+                    "'contactName': 'Yannick Hoppe'}"
+                ),
+            },
+            {
+                "price": 9980, "mileage": 122621,
+                "first_registration": "2010-11-01",
+                "title": "Audi A5 Cabriolet 2.0 TFSI",
+                "seller": "Fahrzeugtechnik Yannick Hoppe",
+            },
+        )
+        self.assertIn(result["classification"], ("STRONG", "VERY_STRONG"))
+        self.assertIn("same seller contact: Yannick Hoppe", result["reasons"])
+
+    def test_confirmed_different_possible_shape_is_low(self):
+        result = self._dd.score_pair(
+            {
+                "price": 32380, "mileage": 59200, "year": 2022,
+                "title": "Audi A5 40 TDI", "colour": "silber",
+                "seller": "Audi Zentrum Trier",
+            },
+            {
+                "price": 32680, "mileage": 58750, "year": 2022,
+                "title": "Audi A5 35 TFSI", "colour": "rot",
+                "seller": "Autohaus Rudolph",
+            },
+        )
+        self.assertEqual(result["classification"], "LOW")
+
+    def test_compatible_signature_with_unrelated_seller_stays_possible(self):
+        result = self._dd.score_pair(
+            {
+                "price": 33980, "mileage": 39565, "year": 2022,
+                "title": "Audi A5 35 TDI", "colour": "wit",
+                "seller": "Fischer Automobile GmbH & Co. KG",
+            },
+            {
+                "price": 34800, "mileage": 40306,
+                "first_registration": "2022-05-01",
+                "title": "Audi A5 Cabriolet S-Line 35 TDI S-Tronic",
+                "colour": "weiß", "seller": "Nord Automobile",
+            },
+        )
+        self.assertEqual(result["classification"], "POSSIBLE")
+        self.assertIn(
+            "seller conflict: Fischer Automobile GmbH & Co. KG vs Nord Automobile",
+            result["differences"],
+        )
+
+    def test_scoring_is_source_neutral(self):
+        a = {
+            "source_id": 1, "price": 24990, "mileage": 39800,
+            "title": "Audi A5 40 TDI", "seller": "Autohaus Beispiel",
+        }
+        b = {
+            "source_id": 2, "price": 24990, "mileage": 39800,
+            "title": "Audi A5 40 TDI", "seller": "Autohaus Beispiel",
+        }
+        forward = self._dd.score_pair(a, b)
+        reverse_sources = self._dd.score_pair(
+            {**a, "source_id": 999},
+            {**b, "source_id": 1000},
+        )
+        self.assertEqual(forward, reverse_sources)
+
+    def test_seller_evidence_shows_clean_name_not_dict(self):
+        """Seller evidence must show extracted company name, not raw dict repr."""
+        raw_seller = "{'dealer': {'companyName': 'Autogalerie Remscheid', 'id': '123'}}"
+        a = {"price": 24990, "mileage": 39800, "seller": raw_seller}
+        b = {"price": 24990, "mileage": 39800, "seller": "Autogalerie Remscheid"}
+        result = self._dd.score_pair(a, b)
+        seller_reasons = [r for r in result["reasons"] if "seller" in r.lower()]
+        self.assertTrue(seller_reasons, "Must have a seller reason")
+        self.assertNotIn("companyName", seller_reasons[0],
+                         "Seller evidence must not contain raw dict key 'companyName'")
+        self.assertIn("Autogalerie Remscheid", seller_reasons[0],
+                      "Seller evidence must show clean company name")
+
+    def test_colour_normalised_in_evidence(self):
+        """Colour evidence must show the normalised canonical colour name."""
+        a = {"price": 24990, "mileage": 39800, "colour": "zilver"}
+        b = {"price": 24990, "mileage": 39800, "colour": "silber"}
+        result = self._dd.score_pair(a, b)
+        colour_reasons = [r for r in result["reasons"] if "colour" in r.lower()]
+        self.assertTrue(colour_reasons, "Must have a colour reason")
+        self.assertIn("silver", colour_reasons[0],
+                      "Colour evidence must show normalised name 'silver'")
+
+    def test_l60_l409_rescore(self):
+        """L60/L409 pair must score correctly with clean seller evidence."""
+        a = {
+            "price": 24990, "mileage": 39800,
+            "seller": "{'dealer': {'companyName': 'Autogalerie Remscheid'}}",
+            "year": "2016", "title": "Audi A5 2.0 TFSI", "colour": "zilver",
+        }
+        b = {
+            "price": 24990, "mileage": 39800,
+            "seller": "Autogalerie Remscheid",
+            "year": "2016", "title": "Audi A5 2.0 TFSI", "colour": "silber",
+        }
+        result = self._dd.score_pair(a, b)
+        # Must match on seller
+        self.assertTrue(
+            any("same seller" in r and "Autogalerie Remscheid" in r for r in result["reasons"]),
+            f"Must show clean seller match: {result['reasons']}",
+        )
+        # Must match on colour (zilver==silber==silver)
+        self.assertTrue(
+            any("same colour: silver" in r for r in result["reasons"]),
+            f"Must show colour match: {result['reasons']}",
+        )
+        # Score must be STRONG or above
+        self.assertGreaterEqual(result["score"], 60,
+                                f"L60/L409 pair must score STRONG or above (got {result['score']})")
+        # No differences
+        self.assertEqual(result["differences"], [],
+                         f"L60/L409 must have no differences: {result['differences']}")

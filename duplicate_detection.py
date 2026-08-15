@@ -40,6 +40,7 @@ DESIGN
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 import unicodedata
@@ -97,9 +98,16 @@ _REQUIRED_CHECK = "('OPEN','CONFIRMED_SAME','CONFIRMED_DIFFERENT','UNSURE','DISM
 # Scoring weights
 # ---------------------------------------------------------------------------
 
-_W_PRICE_EXACT    = 20   # price within 1%
-_W_MILEAGE_EXACT  = 20   # mileage within 2% or 500 km
+_W_PRICE_EXACT    = 20   # equal price
+_W_PRICE_CLOSE    = 20   # price within 1%
+_W_MILEAGE_EXACT  = 20   # equal mileage
+_W_MILEAGE_CLOSE  = 15   # mileage within 2% or 500 km
 _W_SELLER_MATCH   = 20   # normalised dealer name match
+_W_SELLER_CONTACT = 15   # normalised seller contact match
+_W_SELLER_RELATED = 10   # conservative shared company identity
+_W_MAKE_MODEL     =  8   # same source-neutral make/model
+_W_ENGINE_FAMILY  =  8   # same explicit engine family (TDI/TFSI)
+_W_MODEL_VARIANT  =  6   # same explicit designation (35/40/45)
 _W_REG_YEAR       = 10   # same registration year
 _W_TITLE_HIGH     = 10   # normalised title similarity ≥ 0.85
 _W_TITLE_MOD      =  5   # normalised title similarity ≥ 0.60
@@ -112,7 +120,13 @@ _W_COLOUR_MATCH   =  2   # same colour family
 _PENALTY_VIN_CONFLICT   = -80   # conflicting VINs → never strong
 _PENALTY_REG_MISMATCH   = -15   # different reg year
 _PENALTY_POWER_CONFLICT = -10   # clearly different engine (>15% difference)
-_PENALTY_SELLER_NEG     =  -8   # explicitly different seller (when both known)
+_PENALTY_SELLER_NEG     = -12   # explicitly different seller (when both known)
+_PENALTY_TRANSMISSION   = -23   # manual vs automatic
+_PENALTY_DRIVETRAIN     =  -8   # incompatible known drive types
+_PENALTY_COLOUR         = -10   # confidently different known colours
+_PENALTY_IDENTITY       = -60   # reliable engine/designation contradiction
+
+_CONTRADICTION_SCORE_CAP = 34
 
 _CLASSIFICATION_VERY_STRONG = "VERY_STRONG"
 _CLASSIFICATION_STRONG      = "STRONG"
@@ -139,18 +153,166 @@ _LEGAL_SUFFIXES = re.compile(
     re.IGNORECASE,
 )
 
-def _norm_seller(s: str | None) -> str:
+# Common generic dealership prefixes that appear on one side but not the other.
+# Stripping these before token comparison avoids false "different seller" verdicts
+# when e.g. PKW.de stores "Autohaus Schmidt" vs AS24 "Schmidt GmbH".
+_DEALER_PREFIXES = re.compile(
+    r"\b(AUTOHAUS|AUTOCENTER|AUTOGALERIE|AUTOZENTRUM|AUTOPARK|AUTOLAND|AUTOMOBILE|"
+    r"AUTO|FAHRZEUGHAUS|FAHRZEUGCENTER|FAHRZEUGTECHNIK|"
+    r"GARAGE|KFZHANDEL|KFZ|MOTOREN|GRUPPE)\b",
+    re.IGNORECASE,
+)
+
+
+def _seller_mapping(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str) or not value.lstrip().startswith("{"):
+        return {}
+    for parser in (json.loads, ast.literal_eval):
+        try:
+            parsed = parser(value)
+        except (ValueError, SyntaxError, TypeError, json.JSONDecodeError):
+            continue
+        if isinstance(parsed, dict):
+            dealer = parsed.get("dealer")
+            return {**dealer, **parsed} if isinstance(dealer, dict) else parsed
+    return {}
+
+
+def _extract_seller_field(s: Any, field: str) -> str:
     if not s:
         return ""
-    # Extract companyName from Python dict repr or JSON string
-    # e.g. "{'companyName': 'Autocenter Neuss ...'}"
-    cn_match = re.search(r"['\"]?companyName['\"]?\s*[:=]\s*['\"]([^'\"]+)['\"]", s)
-    if cn_match:
-        s = cn_match.group(1)
+    mapping = _seller_mapping(s)
+    aliases = {
+        "companyName": ("companyName", "company_name", "seller_name", "name"),
+        "contactName": ("contactName", "contact_name"),
+    }
+    for alias in aliases.get(field, (field,)):
+        if mapping.get(alias):
+            return str(mapping[alias]).strip()
+    match = re.search(
+        rf"['\"]?{re.escape(field)}['\"]?\s*[:=]\s*['\"]([^'\"]+)['\"]",
+        str(s),
+        re.IGNORECASE,
+    )
+    return match.group(1).strip() if match else ""
+
+
+def _extract_company_name(s: Any) -> str:
+    """Extract the bare company name from raw seller strings.
+
+    Handles:
+    - Python dict repr: "{'companyName': 'Foo GmbH', ...}"
+    - JSON string:      '{"companyName": "Foo GmbH"}'
+    - Plain string:     "Foo GmbH"
+    """
+    if not s:
+        return ""
+    company = _extract_seller_field(s, "companyName")
+    if company:
+        return company
+    if str(s).lstrip().startswith(("{", "[")):
+        return ""
+    return str(s)
+
+
+def _extract_contact_name(s: Any) -> str:
+    return _extract_seller_field(s, "contactName")
+
+
+def _norm_seller(s: str | None) -> str:
+    """Normalise a seller/dealer string for token-similarity comparison.
+
+    Steps:
+    1. Extract companyName from dict/JSON repr when present.
+    2. Upper-case and strip punctuation via _norm_text.
+    3. Remove legal entity suffixes (GmbH, KG, …).
+    4. Remove common generic dealership prefixes (Autohaus, Auto, …).
+    5. Collapse whitespace.
+
+    The result is suitable for token similarity — stripping both legal
+    suffixes and generic prefixes means "Autohaus Schmidt GmbH" and
+    "Schmidt" resolve to the same core token "SCHMIDT".
+    """
+    if not s:
+        return ""
+    s = _extract_company_name(s)
     s = _norm_text(s)
     s = _LEGAL_SUFFIXES.sub(" ", s)
+    s = _DEALER_PREFIXES.sub(" ", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s
+
+
+def _seller_identity(s: Any) -> dict[str, str]:
+    raw = str(s or "")
+    company = _extract_company_name(raw)
+    contact = _extract_contact_name(raw)
+    return {
+        "seller_company": company,
+        "seller_contact": contact,
+        "seller_company_norm": _norm_seller(company),
+        "seller_contact_norm": _norm_text(contact),
+    }
+
+
+def _company_similarity(a: str, b: str) -> tuple[str, float]:
+    """Return exact, related, or different for two normalized companies."""
+    if not a or not b:
+        return "unknown", 0.0
+    similarity = _token_similarity(a, b)
+    if a == b or similarity >= 0.70:
+        return "exact", similarity
+
+    tokens_a = {
+        token for token in a.split()
+        if len(token) >= 3 and token not in _GENERIC_COMPANY_TOKENS
+    }
+    tokens_b = {
+        token for token in b.split()
+        if len(token) >= 3 and token not in _GENERIC_COMPANY_TOKENS
+    }
+    shared = tokens_a & tokens_b
+    if shared:
+        containment = len(shared) / min(len(tokens_a), len(tokens_b))
+        if containment >= 0.50:
+            return "related", containment
+    return "different", similarity
+
+
+_GENERIC_CONTACT_TOKENS = {
+    "TEAM", "VERKAUF", "VERKAUFSTEAM", "IHRE", "IHR", "SALES",
+}
+_GENERIC_COMPANY_TOKENS = {"DAS", "DER", "DIE", "THE", "UND"}
+
+
+def _contact_matches_seller(contact: str, seller_company: str) -> bool:
+    contact_tokens = {
+        token for token in _norm_text(contact).split()
+        if len(token) >= 3 and token not in _GENERIC_CONTACT_TOKENS
+    }
+    seller_tokens = set(_norm_text(seller_company).split())
+    return len(contact_tokens) >= 2 and contact_tokens <= seller_tokens
+
+
+def _seller_contact_match(a: dict[str, str], b: dict[str, str]) -> str:
+    if (
+        a["seller_contact_norm"]
+        and a["seller_contact_norm"] == b["seller_contact_norm"]
+    ):
+        return a["seller_contact"]
+    if (
+        a["seller_contact"]
+        and _contact_matches_seller(a["seller_contact"], b["seller_company"])
+    ):
+        return a["seller_contact"]
+    if (
+        b["seller_contact"]
+        and _contact_matches_seller(b["seller_contact"], a["seller_company"])
+    ):
+        return b["seller_contact"]
+    return ""
 
 
 _COLOUR_MAP = {
@@ -173,7 +335,11 @@ def _norm_colour(s: str | None) -> str:
     if not s:
         return ""
     key = s.lower().strip()
-    return _COLOUR_MAP.get(key, key)
+    if key in _COLOUR_MAP:
+        return _COLOUR_MAP[key]
+    tokens = re.findall(r"[\wäöüß]+", key)
+    mapped = {_COLOUR_MAP[token] for token in tokens if token in _COLOUR_MAP}
+    return mapped.pop() if len(mapped) == 1 else key
 
 
 _DRIVE_MAP = {
@@ -200,6 +366,74 @@ def _norm_gearbox(s: str | None) -> str:
     if not s:
         return ""
     return _GEARBOX_MAP.get(s.lower().strip(), s.lower().strip())
+
+
+_ENGINE_FAMILY_PATTERN = re.compile(
+    r"(?<![A-Z])(TDI|TFSI|FSI|TSI)(?![A-Z])",
+    re.IGNORECASE,
+)
+_MODEL_DESIGNATION_PATTERN = re.compile(
+    r"(?<!\d)(25|30|35|40|45|50|55|60)\s*(TDI|TFSI|FSI|TSI)(?![A-Z])",
+    re.IGNORECASE,
+)
+
+
+def _norm_fuel_family(value: str | None) -> str:
+    normalized = _norm_text(value)
+    if any(token in normalized for token in ("DIESEL", "TDI")):
+        return "diesel"
+    if any(
+        token in normalized
+        for token in ("BENZIN", "PETROL", "GASOLINE", "TFSI", "FSI", "TSI")
+    ):
+        return "petrol"
+    if any(token in normalized for token in ("ELEKTRO", "ELECTRIC")):
+        return "electric"
+    return ""
+
+
+def _vehicle_signature(data: dict[str, Any]) -> dict[str, str]:
+    """Extract only high-confidence identity tokens from structured data/title."""
+    title = str(data.get("title") or "")
+    structured_variant = str(data.get("model_designation") or "")
+    structured_designation = (
+        re.fullmatch(
+            r"(25|30|35|40|45|50|55|60)",
+            structured_variant.strip(),
+        )
+        or _MODEL_DESIGNATION_PATTERN.search(structured_variant)
+    )
+    designation_match = _MODEL_DESIGNATION_PATTERN.search(title)
+    structured_engine = _ENGINE_FAMILY_PATTERN.search(
+        f"{data.get('engine_family') or ''} {structured_variant}"
+    )
+    engine_match = structured_engine or _ENGINE_FAMILY_PATTERN.search(title)
+    engine_family = engine_match.group(1).upper() if engine_match else ""
+    fuel_family = _norm_fuel_family(data.get("fuel"))
+    if engine_family == "TDI":
+        fuel_family = "diesel"
+    elif engine_family in {"TFSI", "FSI", "TSI"}:
+        fuel_family = "petrol"
+
+    make = _norm_text(data.get("make"))
+    model = _norm_text(data.get("model"))
+    if not make or not model:
+        title_tokens = _norm_text(title).split()
+        if len(title_tokens) >= 2:
+            make = make or title_tokens[0]
+            model = model or title_tokens[1]
+
+    return {
+        "make": make,
+        "model": model,
+        "engine_family": engine_family,
+        "fuel_family": fuel_family,
+        "model_designation": (
+            structured_designation.group(1)
+            if structured_designation
+            else designation_match.group(1) if designation_match else ""
+        ),
+    }
 
 
 def _token_similarity(a: str, b: str) -> float:
@@ -313,6 +547,13 @@ def _listing_data(listing_row, snap: dict[str, Any]) -> dict[str, Any]:
         "vin": snap.get("vin"),
         "make": snap.get("make"),
         "model": snap.get("model"),
+        "fuel": snap.get("fuel") or snap.get("fuel_type"),
+        "engine_family": snap.get("engine_family"),
+        "model_designation": (
+            snap.get("model_designation")
+            or snap.get("model_variant")
+            or snap.get("variant")
+        ),
     }
 
 
@@ -332,7 +573,7 @@ def score_pair(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
     score = 0
     reasons: list[str] = []
     differences: list[str] = []
-    vin_conflict = False
+    hard_contradiction = False
 
     # ── VIN check ──────────────────────────────────────────────────────────
     vin_a = (a.get("vin") or "").strip().upper()
@@ -343,51 +584,121 @@ def score_pair(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
             reasons.append("exact VIN match")
             score += 40
         else:
-            vin_conflict = True
+            hard_contradiction = True
             differences.append(f"conflicting VIN: {vin_a} vs {vin_b}")
 
     # ── Price ───────────────────────────────────────────────────────────────
-    pa, pb = a.get("price"), b.get("price")
-    if pa and pb:
+    pa, pb = _to_int(a.get("price")), _to_int(b.get("price"))
+    if pa is not None and pb is not None:
         diff_pct = abs(pa - pb) / max(pa, pb)
-        if diff_pct <= 0.01:
+        if pa == pb:
             score += _W_PRICE_EXACT
-            reasons.append(f"exact price: {pa}")
+            reasons.append(f"exact price: €{pa:,}".replace(",", "."))
+        elif diff_pct <= 0.01:
+            score += _W_PRICE_CLOSE
+            reasons.append(f"close price: €{pa:,} vs €{pb:,}".replace(",", "."))
         elif diff_pct <= 0.05:
             score += _W_PRICE_EXACT // 2
-            reasons.append(f"very close price: {pa} vs {pb}")
+            reasons.append(f"close price: €{pa:,} vs €{pb:,}".replace(",", "."))
         else:
-            differences.append(f"price difference: {pa} vs {pb} ({diff_pct:.0%})")
+            differences.append(f"different price: €{pa:,} vs €{pb:,} ({diff_pct:.0%})".replace(",", "."))
 
     # ── Mileage ─────────────────────────────────────────────────────────────
-    ma = a.get("mileage")
-    mb = b.get("mileage")
-    if ma and mb:
+    ma = _to_int(a.get("mileage"))
+    mb = _to_int(b.get("mileage"))
+    if ma is not None and mb is not None:
         diff_km = abs(ma - mb)
         diff_pct = diff_km / max(ma, mb)
-        if diff_km <= 500 or diff_pct <= 0.02:
+        if ma == mb:
             score += _W_MILEAGE_EXACT
-            reasons.append(f"exact mileage: {ma} km")
+            reasons.append(f"exact mileage: {ma:,} km".replace(",", "."))
+        elif diff_km <= 500 or diff_pct <= 0.02:
+            score += _W_MILEAGE_CLOSE
+            reasons.append(f"close mileage: {ma:,} vs {mb:,} km".replace(",", "."))
         elif diff_pct <= 0.05:
-            score += _W_MILEAGE_EXACT // 2
-            reasons.append(f"close mileage: {ma} vs {mb} km")
+            score += _W_MILEAGE_EXACT // 4
+            reasons.append(f"close mileage: {ma:,} vs {mb:,} km".replace(",", "."))
         else:
-            differences.append(f"mileage difference: {ma} vs {mb} km ({diff_pct:.0%})")
+            differences.append(f"different mileage: {ma:,} vs {mb:,} km ({diff_pct:.0%})".replace(",", "."))
 
     # ── Seller ──────────────────────────────────────────────────────────────
-    sa = _norm_seller(a.get("seller"))
-    sb = _norm_seller(b.get("seller"))
-    if sa and sb:
-        sim = _token_similarity(sa, sb)
-        if sim >= 0.70:
+    seller_a = _seller_identity(a.get("seller"))
+    seller_b = _seller_identity(b.get("seller"))
+    contact_match = _seller_contact_match(seller_a, seller_b)
+    if contact_match:
+        score += _W_SELLER_CONTACT
+        reasons.append(f"same seller contact: {contact_match}")
+
+    if seller_a["seller_company_norm"] and seller_b["seller_company_norm"]:
+        relationship, _ = _company_similarity(
+            seller_a["seller_company_norm"], seller_b["seller_company_norm"]
+        )
+        if relationship == "exact":
             score += _W_SELLER_MATCH
-            reasons.append(f"same seller: {a.get('seller')!r}")
-        elif sim >= 0.40:
-            score += _W_SELLER_MATCH // 2
-            reasons.append("similar seller name")
+            reasons.append(f"same seller company: {seller_a['seller_company']}")
+        elif relationship == "related":
+            score += _W_SELLER_RELATED
+            reasons.append(
+                "related seller companies: "
+                f"{seller_a['seller_company']} / {seller_b['seller_company']}"
+            )
         else:
             score += _PENALTY_SELLER_NEG
-            differences.append(f"different seller: {a.get('seller')!r} vs {b.get('seller')!r}")
+            differences.append(
+                f"seller conflict: {seller_a['seller_company']} vs "
+                f"{seller_b['seller_company']}"
+            )
+
+    # ── Vehicle signature ───────────────────────────────────────────────────
+    signature_a = _vehicle_signature(a)
+    signature_b = _vehicle_signature(b)
+    if (
+        signature_a["make"] and signature_b["make"]
+        and signature_a["model"] and signature_b["model"]
+        and signature_a["make"] == signature_b["make"]
+        and signature_a["model"] == signature_b["model"]
+    ):
+        score += _W_MAKE_MODEL
+        reasons.append(
+            f"same make/model: {signature_a['make'].title()} {signature_a['model']}"
+        )
+
+    engine_a = signature_a["engine_family"]
+    engine_b = signature_b["engine_family"]
+    if engine_a and engine_b:
+        if engine_a == engine_b:
+            score += _W_ENGINE_FAMILY
+            reasons.append(f"same engine family: {engine_a}")
+        else:
+            score += _PENALTY_IDENTITY
+            hard_contradiction = True
+            differences.append(f"engine conflict: {engine_a} vs {engine_b}")
+    elif signature_a["fuel_family"] and signature_b["fuel_family"]:
+        if signature_a["fuel_family"] == signature_b["fuel_family"]:
+            score += _W_ENGINE_FAMILY // 2
+            reasons.append(
+                f"compatible fuel family: {signature_a['fuel_family']}"
+            )
+        else:
+            score += _PENALTY_IDENTITY
+            hard_contradiction = True
+            differences.append(
+                f"fuel family conflict: {signature_a['fuel_family']} vs "
+                f"{signature_b['fuel_family']}"
+            )
+
+    designation_a = signature_a["model_designation"]
+    designation_b = signature_b["model_designation"]
+    if designation_a and designation_b:
+        if designation_a == designation_b:
+            score += _W_MODEL_VARIANT
+            reasons.append(f"same model designation: {designation_a}")
+        else:
+            score += _PENALTY_IDENTITY
+            hard_contradiction = True
+            differences.append(
+                f"model designation conflict: {designation_a} vs {designation_b}"
+            )
 
     # ── Registration year ───────────────────────────────────────────────────
     ya = _reg_year(a)
@@ -438,10 +749,13 @@ def score_pair(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
         diff_pct = abs(hpa - hpb) / max(hpa, hpb)
         if diff_pct <= 0.05:
             score += _W_POWER_MATCH
-            reasons.append(f"same power: {hpa} hp")
+            if hpa == hpb:
+                reasons.append(f"same power: {hpa} hp")
+            else:
+                reasons.append(f"compatible power: {hpa} vs {hpb} hp")
         elif diff_pct > 0.15:
             score += _PENALTY_POWER_CONFLICT
-            differences.append(f"different power: {hpa} vs {hpb} hp")
+            differences.append(f"power conflict: {hpa} hp vs {hpb} hp")
 
     # ── Transmission ────────────────────────────────────────────────────────
     ga = _norm_gearbox(a.get("transmission"))
@@ -451,7 +765,8 @@ def score_pair(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
             score += _W_TRANSMISSION
             reasons.append(f"same transmission: {ga}")
         else:
-            differences.append(f"different transmission: {ga} vs {gb}")
+            score += _PENALTY_TRANSMISSION
+            differences.append(f"transmission conflict: {ga} vs {gb}")
 
     # ── Drivetrain ──────────────────────────────────────────────────────────
     dra = _norm_drive(a.get("drivetrain"))
@@ -461,7 +776,8 @@ def score_pair(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
             score += _W_DRIVETRAIN
             reasons.append(f"same drivetrain: {dra}")
         else:
-            differences.append(f"different drivetrain: {dra} vs {drb}")
+            score += _PENALTY_DRIVETRAIN
+            differences.append(f"drivetrain conflict: {dra} vs {drb}")
 
     # ── Colour ──────────────────────────────────────────────────────────────
     ca = _norm_colour(a.get("colour"))
@@ -471,18 +787,16 @@ def score_pair(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
             score += _W_COLOUR_MATCH
             reasons.append(f"same colour: {ca}")
         else:
-            differences.append(f"different colour: {ca} vs {cb}")
+            score += _PENALTY_COLOUR
+            differences.append(f"colour conflict: {ca} vs {cb}")
 
     score = max(0, min(100, score))
 
-    # ── VIN conflict hard veto ──────────────────────────────────────────────
-    # Conflicting VINs mean these cannot be the same physical vehicle.
-    # Cap classification at POSSIBLE and zero the score, regardless of
-    # how many other signals matched.
-    if vin_conflict:
-        score = min(score, 30)
-        classification = _CLASSIFICATION_POSSIBLE if score >= 35 else _CLASSIFICATION_LOW
-        differences.insert(0, "VIN_CONFLICT_VETO: capped at POSSIBLE")
+    # VIN, engine-family, fuel-family, and reliable designation conflicts
+    # override coincidental price/mileage/year similarity.
+    if hard_contradiction:
+        score = min(score, _CONTRADICTION_SCORE_CAP)
+        classification = _classify(score)
     else:
         classification = _classify(score)
 
@@ -495,16 +809,10 @@ def score_pair(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
 
 
 def _reg_year(d: dict) -> int | None:
-    yr = d.get("year")
-    if yr:
-        try:
-            return int(str(yr)[:4])
-        except (ValueError, TypeError):
-            pass
-    reg = d.get("first_registration") or ""
-    m = re.match(r"(\d{4})", str(reg))
-    if m:
-        return int(m.group(1))
+    for value in (d.get("year"), d.get("first_registration")):
+        match = re.search(r"\b((?:19|20)\d{2})\b", str(value or ""))
+        if match:
+            return int(match.group(1))
     return None
 
 
