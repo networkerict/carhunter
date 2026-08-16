@@ -23,6 +23,10 @@ Status: Authoritative Design Baseline
 - [4. Functional Requirements](#4-functional-requirements)
 - [5. Non Functional Requirements](#5-non-functional-requirements)
 - [6. High Level Architecture](#6-high-level-architecture)
+  - [6.1 Platform Context](#61-platform-context)
+  - [6.2 Component View (Compatibility-first)](#62-component-view-compatibility-first)
+  - [6.3 Sequence: Daily Full Pipeline Run](#63-sequence-daily-full-pipeline-run)
+  - [6.4 Runtime Topology and Deployment Layout](#64-runtime-topology-and-deployment-layout)
 - [7. Source Framework](#7-source-framework)
 - [8. Vehicle Normalization](#8-vehicle-normalization)
 - [9. Duplicate Detection](#9-duplicate-detection)
@@ -211,6 +215,43 @@ sequenceDiagram
                 O->>N: Send summary and alerts
                 O-->>S: Run status and metrics
 ```
+
+### 6.4 Runtime Topology and Deployment Layout
+
+#### Environment topology
+
+- Production code path: `/opt/carhunter/v2.9`
+- Production alias: `/opt/carhunter/current`
+- Development code path: `/opt/carhunter/v3.0-dev`
+- Database model: one SQLite `carhunter.db` file per environment directory
+
+This runtime layout preserves the existing symlink-based promotion model while keeping development and production data and service paths isolated.
+
+#### Logical layers
+
+- Entry points: `autohunter.py` (CLI) and `webapp.py` (web application)
+- Orchestration layer: `orchestration.py` and `pipeline.py`
+- Domain logic: scraping, options, scoring, deals, watchlist, and recommendations
+- Persistence layer: `database.py`
+- Reporting and notifications: dashboard/reporting/telegram integrations
+
+These layers are compatible with the component view above and provide the operator-facing shorthand for how the deployed system is organized at runtime.
+
+#### Service separation
+
+- Production web service: `autohunter-web.service` on port 5000
+- Development web service: `autohunter-web-dev.service` on port 5001
+- Production pipeline scheduler: `autohunter-pipeline.timer` -> `autohunter-pipeline.service`
+
+Service separation ensures development activity does not interfere with the production web surface or scheduled production pipeline runs.
+
+#### Deployment principles
+
+- Symlink-controlled production through `current`
+- Immutable version directories per release
+- Explicit promotion from development to production
+
+These principles remain the operational baseline for v3.0 and should be preserved as architecture constraints, not treated as implementation details.
 
 ## 7. Source Framework
 

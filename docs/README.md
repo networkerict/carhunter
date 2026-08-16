@@ -5,7 +5,7 @@
 - Development branch: v3.0-dev (active)
 
 ## Core Documents
-- Architecture: `Architecture.md`
+- Architecture: `ARCHITECTURE.md` (authoritative v3.0 architecture baseline)
 - Pipeline: `Pipeline.md`
 - Scoring: `Scoring.md`
 - Database: `Database.md`
@@ -26,7 +26,6 @@
 
 ## Legacy References
 Legacy files retained for history/reference:
-- `ARCHITECTURE.md`
 - `DATABASE.md`
 - `RELEASE_PROMOTION_RUNBOOK.md`
 - `RELEASE_CHECKLIST.md`
